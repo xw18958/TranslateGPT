@@ -1,0 +1,19 @@
+# Personal conversation configuration and credentials
+config/*.local.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Generated apps, module caches and test artifacts
+/build/
+.DS_Store
+*.app/
+*.dSYM/
+*.log
+__pycache__/
+*.pyc
+# Local IDE state
+.vscode/
+.idea/
+*.xcuserstate

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>TranslateGPT</string>
+	<key>CFBundleExecutable</key>
+	<string>TranslateGPT</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.xw.quickselecttranslate</string>
+	<key>CFBundleName</key>
+	<string>TranslateGPT</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.3</string>
+	<key>CFBundleVersion</key>
+	<string>5</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSUIElement</key>
+	<false/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>TranslateGPT controls only the designated Safari Translation Engine page to submit selected text and read its translation while you use other tabs.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>TranslateGPT captures only a region you explicitly select, recognizes its English text locally, and sends only that text to your designated Translation Engine conversation.</string>
+</dict>
+</plist>
