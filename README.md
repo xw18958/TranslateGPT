@@ -2,7 +2,7 @@
 
 A native macOS English-to-Simplified-Chinese translator. Select text in another app to see a floating, Chinese-only translation panel. For text in images, scanned PDFs or inaccessible app views, explicitly select a screen region for local OCR.
 
-This repository contains the 0.2.9 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
+This repository contains the 0.2.10 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
 
 ## Features
 

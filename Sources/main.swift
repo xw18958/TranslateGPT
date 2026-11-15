@@ -107,6 +107,41 @@ final class TranslateModel: ObservableObject {
     }
 }
 
+// Turns common LaTeX into readable Unicode math: \alpha_{\min} → α_min, r_i → rᵢ, \frac{a}{b} → a/b.
+enum MathText {
+    static let symbols:[String:String]=["alpha":"α","beta":"β","gamma":"γ","delta":"δ","epsilon":"ε","varepsilon":"ε","zeta":"ζ","eta":"η","theta":"θ","lambda":"λ","mu":"μ","nu":"ν","xi":"ξ","pi":"π","rho":"ρ","sigma":"σ","tau":"τ","phi":"φ","varphi":"φ","chi":"χ","psi":"ψ","omega":"ω",
+        "Gamma":"Γ","Delta":"Δ","Theta":"Θ","Lambda":"Λ","Pi":"Π","Sigma":"Σ","Phi":"Φ","Psi":"Ψ","Omega":"Ω","le":"≤","leq":"≤","ge":"≥","geq":"≥","neq":"≠","ne":"≠","approx":"≈","times":"×","cdot":"·","pm":"±",
+        "in":"∈","sum":"∑","prod":"∏","int":"∫","infty":"∞","partial":"∂","nabla":"∇","to":"→","rightarrow":"→","leftarrow":"←","sim":"∼","propto":"∝","odot":"⊙","otimes":"⊗","oplus":"⊕","ldots":"…","cdots":"⋯",
+        "min":"min","max":"max","log":"log","exp":"exp","arg":"arg","sqrt":"√","quad":" ","qquad":"  ","left":"","right":"",",":" ",";":" "]
+    static let sub:[Character:Character]=["0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉","i":"ᵢ","j":"ⱼ","k":"ₖ","n":"ₙ","t":"ₜ","+":"₊","-":"₋","a":"ₐ","e":"ₑ","o":"ₒ","x":"ₓ","m":"ₘ","l":"ₗ","s":"ₛ","p":"ₚ","r":"ᵣ","u":"ᵤ","v":"ᵥ","h":"ₕ"]
+    static let sup:[Character:Character]=["0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","n":"ⁿ","i":"ⁱ","T":"ᵀ","t":"ᵗ","k":"ᵏ"]
+    static func readable(_ tex: String) -> String {
+        var s=tex
+        for _ in 0..<3 { s=s.replacingOccurrences(of:#"\\(?:frac|dfrac|tfrac)\{([^{}]*)\}\{([^{}]*)\}"#,with:"($1)/($2)",options:.regularExpression) }
+        s=s.replacingOccurrences(of:#"\\(?:mathrm|text|mathbf|mathit|operatorname|boldsymbol|mathcal|hat|bar|tilde)\{([^{}]*)\}"#,with:"$1",options:.regularExpression)
+        s=s.replacingOccurrences(of:#"\\([A-Za-z]+|[,;])"#,with:"\u{1}$1\u{2}",options:.regularExpression)
+        for (name,value) in symbols { s=s.replacingOccurrences(of:"\u{1}"+name+"\u{2}",with:value) }
+        s=s.replacingOccurrences(of:#"\x{1}([A-Za-z]+)\x{2}"#,with:"$1",options:.regularExpression)
+        s=script(s,"_",sub); s=script(s,"^",sup)
+        s=s.replacingOccurrences(of:"{",with:"").replacingOccurrences(of:"}",with:"").replacingOccurrences(of:"-",with:"−")
+        return s.replacingOccurrences(of:#"\(([A-Za-z0-9α-ω]+)\)/\(([A-Za-z0-9α-ω]+)\)"#,with:"$1/$2",options:.regularExpression)
+    }
+    // x_{ab} → x with Unicode subscripts when every character has one, else x_ab.
+    static func script(_ s:String,_ mark:Character,_ table:[Character:Character]) -> String {
+        var out="",i=s.startIndex
+        while i<s.endIndex {
+            guard s[i]==mark, s.index(after:i)<s.endIndex else { out.append(s[i]); i=s.index(after:i); continue }
+            var j=s.index(after:i), body=""
+            if s[j]=="{", let close=s[j...].firstIndex(of:"}") { body=String(s[s.index(after:j)..<close]); j=s.index(after:close) }
+            else { body=String(s[j]); j=s.index(after:j) }
+            let mapped=body.compactMap { table[$0] }
+            out += mapped.count==body.count && !body.isEmpty ? String(mapped) : String(mark)+body
+            i=j
+        }
+        return out
+    }
+}
+
 // Renders the Markdown subset the page agent produces: paragraphs, lists, headings, quotes, emphasis and code.
 // Inline emphasis is parsed here rather than with CommonMark, whose flanking rules leave `**粗体：**后文` unbolded.
 enum TranslationFormatting {
@@ -143,6 +178,13 @@ enum TranslationFormatting {
         func flush() { if !plain.isEmpty { out.append(AttributedString(plain)); plain="" } }
         while i<text.endIndex {
             let after=text.index(after:i)
+            if text[i]=="$" {
+                let double=text[i...].hasPrefix("$$"), start=text.index(i,offsetBy:double ? 2:1)
+                if start<=text.endIndex, let close=text[start...].range(of:double ? "$$":"$"), close.lowerBound>start {
+                    flush(); var math=AttributedString(MathText.readable(String(text[start..<close.lowerBound]))); math.inlinePresentationIntent = .emphasized
+                    out.append(math); i=close.upperBound; continue
+                }
+            }
             if text[i]=="`", after<text.endIndex, let close=text[after...].firstIndex(of:"`") {
                 flush(); var code=AttributedString(String(text[after..<close])); code.inlinePresentationIntent = .code
                 out.append(code); i=text.index(after:close); continue

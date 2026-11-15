@@ -80,6 +80,8 @@ actor FakeProgressTranslator: ProgressiveTranslationBackend {
         precondition(String(cjkBold.characters)=="我的判断：我会送审，并标注 LLM。")
         precondition(cjkBold.runs.contains { $0.inlinePresentationIntent == .stronglyEmphasized && String(cjkBold[$0.range].characters)=="我的判断：" })
         precondition(cjkBold.runs.contains { $0.inlinePresentationIntent == .emphasized } && cjkBold.runs.contains { $0.inlinePresentationIntent == .code })
+        precondition(TranslationFormatting.plain("系数 $\\alpha_i = \\alpha_{\\min} + r_i(\\alpha_{\\max}-\\alpha_{\\min}),$")=="系数 αᵢ = αₘᵢₙ + rᵢ(αₘₐₓ−αₘᵢₙ),")
+        precondition(MathText.readable("\\frac{a}{b} \\le \\theta_{0,i}")=="a/b ≤ θ₀,ᵢ" || MathText.readable("\\frac{a}{b} \\le \\theta_{0,i}")=="a/b ≤ θ_0,i")
         print("PASS layout rendering: paragraphs, bullets, numbering, headings, quotes, code blocks, CJK-safe bold, italics and inline code; plain copy keeps line breaks and bullets")
 
         let suite="TranslateGPT-verification-"+UUID().uuidString
