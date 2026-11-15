@@ -85,6 +85,53 @@ actor FakeProgressTranslator: ProgressiveTranslationBackend {
         precondition(scripted.runs.count==3 && scripted.runs.contains { $0[AttributeScopes.SwiftUIAttributes.BaselineOffsetAttribute.self]==6 && String(scripted[$0.range].characters)=="high" })
         print("PASS layout rendering: paragraphs, bullets, numbering, headings, quotes, code blocks, CJK-safe bold, italics and inline code; plain copy keeps line breaks and bullets")
 
+        // Typeset panel: Markdown → escaped HTML; formulas → MathML (Temml) or the sub/superscript fallback.
+        let noMath: (String, Bool) -> String? = { _, _ in nil }
+        let fakeMath: (String, Bool) -> String? = { (tex: String, display: Bool) -> String? in
+            let attribute: String = display ? " display=\"block\"" : ""
+            let body: String = TranslationHTML.escape(tex)
+            return "<math\(attribute)>\(body)</math>"
+        }
+        precondition(TranslationHTML.render("a <b> & \"c\" <script>x</script>", math: noMath) == "<p>a &lt;b&gt; &amp; &quot;c&quot; &lt;script&gt;x&lt;/script&gt;</p>")
+        precondition(TranslationHTML.render("第一行\n第二行\n\n第二段", math: noMath) == "<p>第一行<br>第二行</p><p>第二段</p>")
+        precondition(TranslationHTML.render("- 一\n- 二\n  1. 子\n- 三", math: noMath) == "<ul><li>一</li><li>二<ol><li>子</li></ol></li><li>三</li></ul>")
+        precondition(TranslationHTML.render("3. 三\n4. 四", math: noMath) == "<ol start=\"3\"><li>三</li><li>四</li></ol>")
+        precondition(TranslationHTML.render("设 $r_i$，见 \\(x^2\\)。\n\n$$\\frac{a}{b}$$\n\n\\[y\\]", math: fakeMath)
+            == "<p>设 <math>r_i</math>，见 <math>x^2</math>。</p><p><math display=\"block\">\\frac{a}{b}</math></p><p><math display=\"block\">y</math></p>")
+        precondition(TranslationHTML.render("价格 $5 和 $10，\\$6", math: fakeMath) == "<p>价格 $5 和 $10，$6</p>")
+        precondition(TranslationHTML.render("`$x$` 和\n```\n$y$ <z>\n```", math: fakeMath) == "<p><code>$x$</code> 和</p><pre><code>$y$ &lt;z&gt;</code></pre>")
+        precondition(TranslationHTML.render("### 小结\n**粗体：**后文 *斜*\n\n> 引用\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n---", math: noMath)
+            == "<h4>小结</h4><p><strong>粗体：</strong>后文 <em>斜</em></p><blockquote>引用</blockquote><table><tr><td>a</td><td>b</td></tr><tr><td>1</td><td>2</td></tr></table><hr>")
+        precondition(TranslationHTML.render("$q_\\ell^{high}$", math: noMath) == "<p><span class=\"tex\">q<sub>ℓ</sub><sup>high</sup></span></p>")
+        precondition(TranslationHTML.render("$a<b$", math: noMath) == "<p><span class=\"tex\">a&lt;b</span></p>")
+        print("PASS typeset panel HTML: escaping, line breaks, nested and numbered lists, inline and displayed math (\\( \\), \\[ \\], $, $$), money and escaped dollars stay text, code untouched, headings, quotes, tables, rules, fallback scripts")
+        let requireTemml=ProcessInfo.processInfo.environment["TRANSLATEGPT_REQUIRE_TEMML"]=="1"
+        if let script=MathRenderer.scriptURL, FileManager.default.fileExists(atPath: script.path) {
+            let loadStart=ProcessInfo.processInfo.systemUptime
+            precondition(MathRenderer.shared.available, "Temml did not load in JavaScriptCore")
+            let loadMs=(ProcessInfo.processInfo.systemUptime-loadStart)*1000
+            let user="r_i = \\frac{\\tilde{z}_i - q_\\ell^{low}}{q_\\ell^{high} - q_\\ell^{low} + \\epsilon}"
+            guard let ml=MathRenderer.shared.mathML(user, display: false) else { preconditionFailure("Temml did not typeset the formula") }
+            for part in ["<mfrac", "<msubsup", "<msub", "ℓ"] { precondition(ml.contains(part), "Temml output lacks \(part)") }
+            precondition(!ml.contains("<script"))
+            guard let block=MathRenderer.shared.mathML("\\sum_{i=1}^{N} x_i", display: true) else { preconditionFailure("Temml did not typeset the displayed sum") }
+            let blockDisplay: Bool = block.contains("display=\"block\"")
+            let blockScripts: Bool = block.contains("<munderover") || block.contains("<msubsup")
+            precondition(blockDisplay && blockScripts)
+            precondition(MathRenderer.shared.mathML("\\frac{a}{", display: false) == nil)
+            precondition(MathRenderer.shared.mathML("\\href{https://example.invalid}{x}", display: false).map { !$0.contains("href=\"") } ?? true)
+            let html=TranslationHTML.render("其中 $\(user)$。")
+            precondition(html.hasPrefix("<p>其中 <math") && html.hasSuffix("</math>。</p>"))
+            let formulaStart=ProcessInfo.processInfo.systemUptime
+            for k in 0..<50 { precondition(MathRenderer.shared.mathML("x_{\(k)} + \\frac{a_\(k)}{b^{\(k)}}", display: false) != nil) }
+            let perFormula=(ProcessInfo.processInfo.systemUptime-formulaStart)*1000/50
+            print(String(format:"TIMING temml_load_ms=%.1f temml_new_formula_avg_ms=%.2f", loadMs, perFormula))
+            print("PASS math typesetting: Temml MathML for the fraction with sub/superscripts and a displayed sum; invalid TeX falls back; links not trusted")
+        } else {
+            precondition(!requireTemml, "Temml is required for this build but missing")
+            print("SKIP math typesetting: Temml not fetched (python3 scripts/fetch_temml.py)")
+        }
+
         let suite="TranslateGPT-verification-"+UUID().uuidString
         let defaults=UserDefaults(suiteName:suite)!
         defer {defaults.removePersistentDomain(forName:suite)}

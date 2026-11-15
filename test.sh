@@ -15,8 +15,11 @@ TRANSLATEGPT_TEST_BRIDGE_PATH="$build_dir/generated/SafariDOMBridge.js" node "$p
 common=(
   "$project_dir/Sources/main.swift" "$project_dir/Sources/SafariChatBackend.swift"
   "$project_dir/Sources/SafariDOMBackend.swift" "$project_dir/Sources/SelectionService.swift"
-  "$project_dir/Sources/RegionOCR.swift" "$build_dir/generated/EngineConfiguration.swift"
+  "$project_dir/Sources/RegionOCR.swift" "$project_dir/Sources/TranslationRendering.swift"
+  "$build_dir/generated/EngineConfiguration.swift"
 )
+temml_script="$project_dir/build/vendor/temml/temml.min.js"
+if [[ -f "$temml_script" ]]; then export TRANSLATEGPT_TEMML_PATH="$temml_script"; fi
 for suite in CoreVerification GlobalVerification; do
   xcrun swiftc -module-cache-path "$module_cache" -D TRANSLATEGPT_TESTS -parse-as-library \
     "${common[@]}" "$project_dir/Tests/$suite.swift" -o "$build_dir/$suite"

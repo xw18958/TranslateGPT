@@ -2,7 +2,7 @@
 
 A native macOS English-to-Simplified-Chinese translator. Select text in another app to see a floating, Chinese-only translation panel. For text in images, scanned PDFs or inaccessible app views, explicitly select a screen region for local OCR.
 
-This repository contains the 0.2.11 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
+This repository contains the 0.2.12 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
 
 ## Features
 
@@ -13,6 +13,7 @@ This repository contains the 0.2.11 source, adapted for a self-contained build a
 - Background use of one configured ChatGPT conversation in Safari, with Instant mode.
 - Progressive output, a bounded in-memory translation cache and cancellation of obsolete requests.
 - Layout-preserving translations: paragraphs, bullet and numbered lists, headings, emphasis and code are kept, rendered in the panel (which grows with longer text and can be resized), and kept by **Copy translation** as line breaks and bullets (plus Markdown for apps that accept it).
+- Typeset math: formulas in a translation are converted from LaTeX to MathML inside the app by the bundled [Temml](https://temml.org) library and displayed with the system's STIX Two Math font, with real fractions, subscripts and superscripts. The panel uses a web view with page scripts disabled, no network access and nothing that can navigate; a formula Temml cannot read falls back to simpler text rendering.
 - Owned engine-tab recovery after index shifts and page reloads; fresh owned windows when an engine tab or window is lost.
 - Draft preservation and protection against automatically replaying an uncertain submission.
 
@@ -23,6 +24,7 @@ Fresh GPT replies depend on the website and can take several seconds. One-second
 - macOS 15.0 or later. Region OCR requires macOS 15.2 or later.
 - Xcode Command Line Tools with a macOS SDK that includes the rectangle screenshot API used in `RegionOCR.swift`.
 - Python 3 for build-time configuration. Node.js is required only for the JavaScript tests.
+- For typeset math, run `python3 scripts/fetch_temml.py` once before building. It downloads the pinned Temml release from the npm registry, checks it against the registry's published sha512 checksum and keeps three files in `build/vendor/temml` (not tracked by Git). Without it the build still works and formulas use the simpler fallback rendering.
 - Safari, signed in to an account with access to the conversation you configure.
 
 The app uses the ordinary ChatGPT website through Safari automation. It does not call a translation API or require an API key.
@@ -94,3 +96,5 @@ An optional on-device OCR check draws synthetic text in memory:
 ```
 
 See [testing coverage](docs/TESTING.md) for the distinction between offline tests and prior live validation. No license has been selected for this initial publication.
+
+Third-party: Temml (MIT licence) is fetched at build time and bundled in the app together with its licence file, `Temml-LICENSE.txt`.

@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import ApplicationServices
 import Combine
+import WebKit
 
 enum BackendError: LocalizedError {
     case unavailable
@@ -228,8 +229,19 @@ enum TranslationFormatting {
     }
 }
 
+// Hosts the shared translation web view; it stays in the hierarchy and is hidden while status text shows.
+struct TranslationWebPane: NSViewRepresentable {
+    let web: TranslationWebView
+    let visible: Bool
+    func makeNSView(context: Context) -> WKWebView { web.view }
+    func updateNSView(_ view: WKWebView, context: Context) { view.isHidden = !visible }
+}
+
 struct TranslationPopup: View {
     @ObservedObject var model: TranslateModel
+    let web: TranslationWebView
+    // Translations (also while streaming) are typeset in the web view; English status and error messages stay plain.
+    static func typeset(_ model: TranslateModel) -> Bool { (model.hasTranslation || model.isLoading) && !model.output.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -251,27 +263,33 @@ struct TranslationPopup: View {
                 .foregroundStyle(.secondary)
             }
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if model.isLoading && model.output.isEmpty {
-                        HStack(spacing: 7) {
-                            ProgressView().controlSize(.small)
-                            Text("Translating…")
+            ZStack(alignment: .topLeading) {
+                TranslationWebPane(web: web, visible: Self.typeset(model))
+                if !Self.typeset(model) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            if model.isLoading && model.output.isEmpty {
+                                HStack(spacing: 7) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Translating…")
+                                }
+                                .foregroundStyle(.secondary)
+                            } else {
+                                Text(model.output)
+                                    .font(.system(size: 15))
+                                    .lineSpacing(2)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
-                        .foregroundStyle(.secondary)
-                    } else {
-                        // Translations are formatted; English status and error messages stay plain.
-                        Text(model.hasTranslation || model.isLoading ? TranslationFormatting.attributed(model.output) : AttributedString(model.output))
-                            .font(.system(size: 15))
-                            .lineSpacing(2)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        if model.isLoading { ProgressView().controlSize(.small).accessibilityLabel("Receiving translation") }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .overlay(alignment: .bottomTrailing) {
+                if Self.typeset(model) && model.isLoading { ProgressView().controlSize(.small).accessibilityLabel("Receiving translation") }
+            }
             HStack {
                 Text("ChatGPT · Translation Engine")
                     .font(.system(size: 10))
@@ -362,9 +380,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activationObserver: NSObjectProtocol?
     private var trustTimer: Timer?
     private var outputObserver: AnyCancellable?
+    private var web: TranslationWebView!
+    private var renderProbe: TranslationWebView?
+    // Panel chrome around the translation: padding, header, dividers and footer.
+    private static let panelChrome: CGFloat = 124
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--render-check") { NSApp.setActivationPolicy(.accessory); runRenderCheck(); return }
         NSApp.setActivationPolicy(.regular)
+        web = TranslationWebView()
 
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 430, height: 250),
@@ -381,14 +405,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isReleasedWhenClosed = false
-        let popup = NSHostingView(rootView: TranslationPopup(model: model))
+        let popup = NSHostingView(rootView: TranslationPopup(model: model, web: web))
         popup.sizingOptions = [] // the panel size is set by fitPanel or by the user, not by SwiftUI's ideal size
         window.contentView = popup
         window.minSize = NSSize(width: 300, height: 200)
         panel = window
-        outputObserver = model.$output.receive(on: DispatchQueue.main).sink { [weak self] text in
-            MainActor.assumeIsolated { guard let self else { return }; self.fitPanel(to: text) }
-        }
+        web.onHeight = { [weak self] height in self?.growPanel(width: 0, height: height + Self.panelChrome) }
+        outputObserver = Publishers.CombineLatest3(model.$output, model.$hasTranslation, model.$isLoading)
+            .receive(on: DispatchQueue.main).sink { [weak self] text, translated, loading in
+                MainActor.assumeIsolated { guard let self else { return }; self.present(text, typeset: (translated || loading) && !text.isEmpty) }
+            }
+        // Load Temml shortly after launch so the first formula does not wait for it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { MainActor.assumeIsolated { MathRenderer.shared.warm() } }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "character.book.closed.fill", accessibilityDescription: "TranslateGPT")
@@ -621,14 +649,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         display(near: point)
     }
 
-    // Grows the panel (never shrinks it mid-reply) so longer translations fit, up to 70% of the screen; beyond that it scrolls.
+    // Translations go to the web view (its measured height sizes the panel); status text is measured here.
+    private func present(_ text: String, typeset: Bool) {
+        if typeset {
+            let plain=TranslationFormatting.plain(text)
+            growPanel(width: Self.preferredWidth(plain), height: 0)
+            let start=StageProfiler.now
+            let html=TranslationHTML.render(text)
+            StageProfiler.finish("markdown_to_html", start)
+            web.show(html)
+        } else {
+            if text.isEmpty { web.show("") }
+            fitPanel(to: text)
+        }
+    }
+
+    private static func preferredWidth(_ plain: String) -> CGFloat { plain.count > 450 || (plain.contains("\n") && plain.count > 220) ? 560 : 430 }
+
     private func fitPanel(to text: String) {
-        guard let panel, panel.isVisible, !text.isEmpty, let area=(panel.screen ?? NSScreen.main)?.visibleFrame else { return }
-        let plain=model.hasTranslation || model.isLoading ? TranslationFormatting.plain(text) : text
-        let width: CGFloat = plain.count > 450 || (plain.contains("\n") && plain.count > 220) ? 560 : 430
-        let measured=NSAttributedString(string:plain,attributes:[.font:NSFont.systemFont(ofSize:15)])
+        guard !text.isEmpty else { return }
+        let width=Self.preferredWidth(text)
+        let measured=NSAttributedString(string:text,attributes:[.font:NSFont.systemFont(ofSize:15)])
             .boundingRect(with:NSSize(width:width-36,height:.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin,.usesFontLeading]).height
-        let height=min(max(250,ceil(measured*1.12)+120),area.height*0.7)
+        growPanel(width: width, height: ceil(measured*1.12)+120)
+    }
+
+    // Grows the panel (never shrinks it mid-reply) so longer translations fit, up to 70% of the screen; beyond that it scrolls.
+    private func growPanel(width: CGFloat, height requested: CGFloat) {
+        guard let panel, panel.isVisible, let area=(panel.screen ?? NSScreen.main)?.visibleFrame else { return }
+        let height=min(max(250,ceil(requested)),area.height*0.7)
         var frame=panel.frame
         let targetW=max(frame.width,width), targetH=max(frame.height,height)
         guard targetW>frame.width || targetH>frame.height else { return }
@@ -647,10 +696,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let w: CGFloat = 430, h: CGFloat = 250
         let x = min(max(point.x + 12, area.minX + 8), area.maxX - w - 8)
         let y = (point.y - h - 14 > area.minY) ? point.y - h - 14 : point.y + 20
-        // Each new translation starts at the base size; fitPanel grows it to the reply.
+        // Each new translation starts at the base size; growPanel enlarges it to the reply.
         panel.setFrame(NSRect(x: x, y: min(max(y, area.minY + 8), area.maxY - h - 8), width: w, height: h), display: true)
         panel.orderFrontRegardless()
-        fitPanel(to: model.output)
+        if TranslationPopup.typeset(model) { present(model.output, typeset: true); web.remeasure() } else { fitPanel(to: model.output) }
         if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=popup uptime=\(ProcessInfo.processInfo.systemUptime)"); fflush(stdout) }
     }
 
@@ -753,10 +802,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
     }
 
+    // Diagnostics only (--render-check): typesets a synthetic translation offscreen, prints timings and quits.
+    // No translation request, no panel, no Dock icon.
+    private func runRenderCheck() {
+        let sample="设 $r_i = \\frac{\\tilde{z}_i - q_\\ell^{low}}{q_\\ell^{high} - q_\\ell^{low} + \\epsilon}$，其中 $r_i \\in [0,1]$。\n\n$$\\mathcal{L} = \\sum_{i=1}^{N} \\lVert x_i - \\hat{x}_i \\rVert_2^2$$\n\n- 第一项 **重点**\n- 第二项 `code`\n\n价格 $5 和 $10 不是公式。"
+        func ms(_ start: Double) -> String { String(format: "%.2f", (StageProfiler.now - start) * 1000) }
+        var started=StageProfiler.now
+        let temml=MathRenderer.shared.available
+        let loadMs=ms(started)
+        started=StageProfiler.now
+        let html=TranslationHTML.render(sample)
+        let firstMs=ms(started)
+        started=StageProfiler.now
+        _=TranslationHTML.render(sample)
+        let cachedMs=ms(started)
+        started=StageProfiler.now
+        let characters=Array(sample)
+        for k in 1...20 { _=TranslationHTML.render(String(characters.prefix(characters.count*k/20))) }
+        let streamMs=ms(started)
+        let mathML=html.components(separatedBy:"<math").count-1, fallback=html.components(separatedBy:"class=\"tex").count-1
+        let money=html.contains("价格 $5 和 $10 不是公式")
+        let probe=TranslationWebView(); renderProbe=probe
+        var updates=0, firstUpdate="", height=0
+        started=StageProfiler.now
+        probe.onHeight={ measured in
+            updates+=1
+            if updates==1 {
+                firstUpdate=ms(started); height=Int(measured)
+                started=StageProfiler.now; probe.show(html+"<p>2</p>")
+                return
+            }
+            let ok=temml && mathML==3 && fallback==0 && money && height>40
+            print("TranslateGPT phase=render_check_complete ok=\(ok) temml=\(temml) mathml_formulas=\(mathML) fallback_formulas=\(fallback) money_kept=\(money) temml_load_ms=\(loadMs) convert_first_ms=\(firstMs) convert_cached_ms=\(cachedMs) convert_20_streaming_updates_ms=\(streamMs) webview_start_and_first_update_ms=\(firstUpdate) webview_update_ms=\(ms(started)) content_height=\(height)")
+            fflush(stdout); exit(ok ? 0:3)
+        }
+        probe.show(html)
+        DispatchQueue.main.asyncAfter(deadline:.now()+20) { print("TranslateGPT phase=render_check_timeout"); fflush(stdout); exit(2) }
+    }
+
     @objc private func showPreview() {
         model.invalidate()
         model.source = "Vision-language models adapt to new tasks."
-        model.output = "视觉语言模型能够适应新任务。"
+        model.output = "视觉语言模型能够适应新任务。归一化排名为\n\n$$r_i = \\frac{\\tilde{z}_i - q_\\ell^{low}}{q_\\ell^{high} - q_\\ell^{low} + \\epsilon}$$\n\n其中 $r_i \\in [0,1]$，**仅为本地示例**。"
         model.isLoading = false
         model.hasTranslation = true
         display(near: NSEvent.mouseLocation)

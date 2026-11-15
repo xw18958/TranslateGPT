@@ -52,6 +52,7 @@
       const inline=n=>{
         if(n.nodeType===3)return (n.nodeValue||'').replace(/\s+/g,' ');
         if(n.nodeType!==1 || skip(n))return '';
+        if(cls(n,'katex-display')){const tex=n.querySelector && n.querySelector('annotation');if(tex)return '$$'+tex.textContent+'$$';}
         if(cls(n,'katex')){const tex=n.querySelector && n.querySelector('annotation');return tex ? '$'+tex.textContent+'$' : (n.textContent||'');}
         if(n.tagName==='BR')return '\n';
         if(n.tagName==='CODE')return '`'+(n.textContent||'')+'`';
