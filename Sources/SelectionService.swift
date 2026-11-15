@@ -40,6 +40,12 @@ final class SelectionSettings {
         get { defaults.object(forKey:"TranslateGPT.copyFallbackEnabled") == nil ? true : defaults.bool(forKey:"TranslateGPT.copyFallbackEnabled") }
         set { defaults.set(newValue,forKey:"TranslateGPT.copyFallbackEnabled") }
     }
+    // What a fresh selection does: show the button and translate on hover (default), on click, or translate at once.
+    enum Trigger: String { case hover, click, immediate }
+    var trigger: Trigger {
+        get { defaults.string(forKey:"TranslateGPT.selectionTrigger").flatMap(Trigger.init(rawValue:)) ?? .hover }
+        set { defaults.set(newValue.rawValue,forKey:"TranslateGPT.selectionTrigger") }
+    }
     func exclude(_ app: SourceApplication) { var items=exclusions; items[app.key]=app.name; defaults.set(items, forKey:exclusionsKey) }
     func include(_ key: String) { var items=exclusions; items.removeValue(forKey:key); defaults.set(items, forKey:exclusionsKey) }
     func permits(_ app: SourceApplication, ownPID: pid_t = ProcessInfo.processInfo.processIdentifier, manual: Bool = false) -> Bool {

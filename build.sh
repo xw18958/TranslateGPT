@@ -14,7 +14,7 @@ xcrun swiftc -module-cache-path "$module_cache" -parse-as-library \
   -target "$(uname -m)-apple-macosx15.0" \
   "$project_dir/Sources/main.swift" "$project_dir/Sources/SafariChatBackend.swift" \
   "$project_dir/Sources/SafariDOMBackend.swift" "$project_dir/Sources/SelectionService.swift" \
-  "$project_dir/Sources/RegionOCR.swift" "$project_dir/Sources/TranslationRendering.swift" \
+  "$project_dir/Sources/RegionOCR.swift" "$project_dir/Sources/TranslationRendering.swift" "$project_dir/Sources/SelectionButton.swift" \
   "$build_dir/generated/EngineConfiguration.swift" \
   -o "$build_dir/TranslateGPT"
 app_dir="$build_dir/TranslateGPT.app"

@@ -15,7 +15,7 @@ TRANSLATEGPT_TEST_BRIDGE_PATH="$build_dir/generated/SafariDOMBridge.js" node "$p
 common=(
   "$project_dir/Sources/main.swift" "$project_dir/Sources/SafariChatBackend.swift"
   "$project_dir/Sources/SafariDOMBackend.swift" "$project_dir/Sources/SelectionService.swift"
-  "$project_dir/Sources/RegionOCR.swift" "$project_dir/Sources/TranslationRendering.swift"
+  "$project_dir/Sources/RegionOCR.swift" "$project_dir/Sources/TranslationRendering.swift" "$project_dir/Sources/SelectionButton.swift"
   "$build_dir/generated/EngineConfiguration.swift"
 )
 temml_script="$project_dir/build/vendor/temml/temml.min.js"

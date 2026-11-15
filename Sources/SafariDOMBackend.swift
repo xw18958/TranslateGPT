@@ -363,7 +363,7 @@ enum EngineIdentity {
                 await pause(0.1)
             }
         }
-        guard preferredInstant else { throw Failure(message:"Instant mode could not be selected. Set Translation Engine to Instant in Safari. No text was sent.") }
+        guard preferredInstant else { throw Failure(message:"ChatGPT is not set to Instant in the translation chat. In Safari, choose Instant in that chat's message box, then select the text again. No text was sent.") }
         StageProfiler.finish("instant_mode_change",modeStart)
         event("instant_mode")
         let id=UUID().uuidString

@@ -2,11 +2,12 @@
 
 A native macOS English-to-Simplified-Chinese translator. Select text in another app to see a floating, Chinese-only translation panel. For text in images, scanned PDFs or inaccessible app views, explicitly select a screen region for local OCR.
 
-This repository contains the 0.2.12 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
+This repository contains the 0.2.13 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
 
 ## Features
 
-- Automatic translation of eligible English selections exposed through macOS Accessibility.
+- Selection translation: after you select English text, a small TranslateGPT button appears beside it; rest the pointer on it (or click it, if you prefer) to translate. Nothing is sent until you do. Hold ⌘ while selecting to get no button. **When text is selected** in the menu switches between hover, click and immediate translation.
+- ChatGPT must be set to Instant in the translation chat, including the mode picker in its message box; otherwise nothing is sent and the panel says so.
 - A copy fallback, with clipboard restore, for apps that do not expose selected text to Accessibility.
 - Visible **Turn On**, **Turn Off** and **Quit** controls, plus per-app exclusions.
 - Explicit region OCR with **Control–Option–Command–T**; Escape cancels.
@@ -76,7 +77,7 @@ Safari must be running and signed in. The app creates and reuses its own minimiz
 - Selected text or locally recognized OCR text is sent to your configured ChatGPT conversation.
 - Screenshots stay temporary in memory; the app does not save or upload them.
 - OCR runs on-device, only after explicit region selection. It is not prewarmed.
-- Selections are read through Accessibility. Only when an app exposes no readable selection does the app press ⌘C for that selection (**Copy fallback when selection is unreadable** in the menu, on by default), translate the copied plain text and put the previous clipboard back exactly. It never does this in password managers, Finder, secure input or on window title bars and controls. A clipboard manager may still record the copied text. The app never reads whole source documents or extracts browser authentication data.
+- Selections are read through Accessibility. Only when an app exposes no readable selection does the app press ⌘C for that selection (with the selection button, only once you point at or click the button) (**Copy fallback when selection is unreadable** in the menu, on by default), translate the copied plain text and put the previous clipboard back exactly. It never does this in password managers, Finder, secure input or on window title bars and controls. A clipboard manager may still record the copied text. The app never reads whole source documents or extracts browser authentication data.
 - Translation history can remain in your ChatGPT conversation. The app's separate cache is memory-only.
 - Native selection support depends on what the source app exposes. In Electron apps (for example the Claude desktop app), the first selection that cannot be read makes TranslateGPT ask that app to expose its text to Accessibility, then read the selection again; code editors such as VS Code and Cursor are excluded because they switch to screen-reader mode. Secure fields and protected content can be unavailable.
 - Safari automation depends on the website's UI and may need maintenance when that UI changes.

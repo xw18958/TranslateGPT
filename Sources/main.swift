@@ -382,6 +382,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var outputObserver: AnyCancellable?
     private var web: TranslationWebView!
     private var renderProbe: TranslationWebView?
+    private var selectionButton: SelectionButton!
     // Panel chrome around the translation: padding, header, dividers and footer.
     private static let panelChrome: CGFloat = 124
 
@@ -389,6 +390,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if CommandLine.arguments.contains("--render-check") { NSApp.setActivationPolicy(.accessory); runRenderCheck(); return }
         NSApp.setActivationPolicy(.regular)
         web = TranslationWebView()
+        selectionButton = SelectionButton()
+        selectionButton.onDismiss = { reason in
+            if StageProfiler.enabled { print("TranslateGPT phase=button_dismissed reason=\(reason)"); fflush(stdout) }
+        }
 
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 430, height: 250),
@@ -429,6 +434,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if settings.enabled {model.warmBackend()}
         let automatic=NSMenuItem(title:"Automatic translation (all apps)",action:#selector(toggleActive(_:)),keyEquivalent:"")
         automatic.target=self;automatic.state=settings.enabled ? .on:.off;menu.addItem(automatic)
+        let triggerRoot=NSMenuItem(title:"When text is selected",action:nil,keyEquivalent:"")
+        let triggerMenu=NSMenu()
+        let modes: [(String, SelectionSettings.Trigger)] = [("Show button, translate on hover", .hover), ("Show button, translate on click", .click), ("Translate immediately", .immediate)]
+        for (title, mode) in modes {
+            let item=NSMenuItem(title:title,action:#selector(setTrigger(_:)),keyEquivalent:"")
+            item.target=self; item.representedObject=mode.rawValue; item.state=settings.trigger==mode ? .on:.off
+            triggerMenu.addItem(item)
+        }
+        triggerRoot.submenu=triggerMenu; menu.addItem(triggerRoot)
         let exclude=NSMenuItem(title:"Exclude current app",action:#selector(excludeCurrentApp),keyEquivalent:"")
         exclude.target=self;exclude.tag=101;menu.addItem(exclude)
         let exclusions=NSMenuItem(title:"Excluded apps",action:nil,keyEquivalent:"")
@@ -506,7 +520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + (moved ? 0.09 : 0.14)) {
                 guard epoch == self.selectionEpoch else { return }
                 StageProfiler.finish("mouse_up_to_extraction_dispatch",dispatchStart)
-                self.translateSelection(from:start,near:location,app:app,window:window,epoch:epoch)
+                self.translateSelection(from:start,near:location,app:app,window:window,epoch:epoch,modifiers:event.modifierFlags)
             }
         } as Any)
 
@@ -518,6 +532,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // remains tied to its source and can finish displaying its result.
                 if self.ocrRecognizing { self.invalidateSelection() }
                 else { self.selectionEpoch += 1;self.extractionTask?.cancel() }
+                self.selectionButton?.hide(reason:"app_switch")
                 if let app=self.currentExternalApp() { self.lastExternalApp=app }
                 if self.regionSelector.active { self.regionSelector.cancel() }
             }
@@ -578,6 +593,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         selectionEpoch += 1
         extractionTask?.cancel(); ocrTask?.cancel()
         ocrRecognizing=false
+        selectionButton?.hide(reason:nil)
         if cancelTranslation {model.invalidate()}
         panel.orderOut(nil)
     }
@@ -587,9 +603,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return CFEqual(window,current)
     }
 
-    private func translateSelection(from start: NSPoint, near point: NSPoint, app: SourceApplication, window: AXUIElement, epoch: Int) {
+    private func translateSelection(from start: NSPoint, near point: NSPoint, app: SourceApplication, window: AXUIElement, epoch: Int, modifiers: NSEvent.ModifierFlags) {
         guard AXIsProcessTrusted(), epoch == selectionEpoch,
               currentExternalApp()?.pid==app.pid, sameWindow(window,app:app), settings.permits(app) else { return }
+        let trigger=settings.trigger
+        if trigger != .immediate, SelectionButtonPolicy.suppressed(modifiers) {
+            if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=selection_skipped reason=command_held");fflush(stdout) }
+            return
+        }
         let from=ScreenCoordinates.quartz(start), end=ScreenCoordinates.quartz(point)
         extractionTask=Task {
             func extract() async -> SelectedContent {
@@ -621,22 +642,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             // Last resort for apps that expose no readable selection: copy it, then restore the clipboard.
             // Also when Accessibility reports two different selections: the app's own copy names the current one.
+            // Eligibility is decided now; with the button, ⌘C is pressed only when the user asks for the translation.
+            var copyAllowed=false
             if result == .none || result == .unavailable || result == .ambiguous, self.settings.copyFallback {
                 let access=AXSelectionAccess(pid:app.pid)
                 let top=access.frame(window).map { from.y-$0.minY < 30 } ?? true
-                if CopyFallbackPolicy.allowed(bundleID:NSRunningApplication(processIdentifier:app.pid)?.bundleIdentifier,
-                                              startRole:access.role(at:from),secureInput:CopyFallbackPolicy.secureInputActive(),nearTitleBar:top) {
-                    let copy=await CopyFallback.copySelection()
-                    if diagnostics { print("TranslateGPT phase=copy_fallback outcome=\(copy.outcome) restored=\(copy.restored)");fflush(stdout) }
-                    guard current() else { return }
-                    if let text=copy.text { result = .text(text) }
-                } else if diagnostics { print("TranslateGPT phase=copy_fallback outcome=skipped");fflush(stdout) }
+                copyAllowed=CopyFallbackPolicy.allowed(bundleID:NSRunningApplication(processIdentifier:app.pid)?.bundleIdentifier,
+                                                       startRole:access.role(at:from),secureInput:CopyFallbackPolicy.secureInputActive(),nearTitleBar:top)
+                if !copyAllowed, diagnostics { print("TranslateGPT phase=copy_fallback outcome=skipped");fflush(stdout) }
+            }
+            @MainActor func copyThenAccept(near target: NSPoint) async {
+                let copy=await CopyFallback.copySelection()
+                if diagnostics { print("TranslateGPT phase=copy_fallback outcome=\(copy.outcome) restored=\(copy.restored)");fflush(stdout) }
+                guard current() else { return }
+                if let text=copy.text { self.accept(text,near:target) }
+            }
+            if trigger == .immediate {
+                if case .text(let text)=result {
+                    if diagnostics { print("TranslateGPT phase=extracted uptime=\(ProcessInfo.processInfo.systemUptime)");fflush(stdout) }
+                    self.accept(text,near:point)
+                } else if copyAllowed { await copyThenAccept(near:point) }
+                return
             }
             if case .text(let text)=result {
-                if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=extracted uptime=\(ProcessInfo.processInfo.systemUptime)");fflush(stdout) }
-                self.accept(text,near:point)
+                let trimmed=text.trimmingCharacters(in:.whitespacesAndNewlines)
+                if let reason=SelectionPolicy.rejection(trimmed) {
+                    if diagnostics { print("TranslateGPT phase=selection_skipped reason=\(reason)");fflush(stdout) }
+                    return
+                }
+                self.offerButton(near:point,trigger:trigger) {
+                    guard current() else { return }
+                    self.accept(trimmed,near:NSEvent.mouseLocation)
+                }
+            } else if copyAllowed {
+                self.offerButton(near:point,trigger:trigger) {
+                    guard current() else { return }
+                    self.extractionTask=Task { await copyThenAccept(near:NSEvent.mouseLocation) }
+                }
             }
         }
+    }
+
+    // Shows the translate button for a readable selection; the Safari worker is readied meanwhile, nothing is sent.
+    private func offerButton(near point: NSPoint, trigger: SelectionSettings.Trigger, action: @escaping @MainActor () -> Void) {
+        model.warmBackend()
+        selectionButton.show(near:point,hover:trigger == .hover,action:action)
+        if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=button_shown uptime=\(ProcessInfo.processInfo.systemUptime)");fflush(stdout) }
     }
 
     private func accept(_ text: String, near point: NSPoint) {
@@ -701,6 +752,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.orderFrontRegardless()
         if TranslationPopup.typeset(model) { present(model.output, typeset: true); web.remeasure() } else { fitPanel(to: model.output) }
         if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=popup uptime=\(ProcessInfo.processInfo.systemUptime)"); fflush(stdout) }
+    }
+
+    @objc private func setTrigger(_ item: NSMenuItem) {
+        guard let raw=item.representedObject as? String, let mode=SelectionSettings.Trigger(rawValue:raw) else { return }
+        settings.trigger=mode
+        for other in item.menu?.items ?? [] { other.state = (other.representedObject as? String)==raw ? .on:.off }
+        if mode == .immediate { selectionButton.hide(reason:nil) }
     }
 
     @objc private func toggleCopyFallback(_ item: NSMenuItem) {

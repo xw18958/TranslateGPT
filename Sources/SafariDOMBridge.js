@@ -171,7 +171,14 @@
   const editable = candidates.filter(e => (e.tagName === 'TEXTAREA' || e.isContentEditable) && visible(e));
   const field = editable.length === 1 ? editable[0] : null;
   const modelButtons = measured('find_model_controls',()=>Array.from(document.querySelectorAll('button[aria-label="Select ChatGPT model"]')).filter(visible));
-  const instant = () => modelButtons.length === 1 && /\bInstant\b/.test(modelButtons[0].innerText);
+  // The selected mode is the control's last visible line ("Thinking effort / Instant" -> Instant). ChatGPT also has a
+  // mode picker inside the message box; when present it must say Instant too, or nothing is sent.
+  const modeValue = b => { const lines=(b.innerText||'').split('\n').map(t=>t.trim()).filter(Boolean); return lines.length ? lines[lines.length-1] : ''; };
+  const modeWord = /^(Instant|Thinking|Auto|Pro|Heavy|Extended|Standard|Light|High|Medium|Low|Fast|Deep)\b/i;
+  const composerForm = field && field.closest ? field.closest('form') : null;
+  const composerPickers = measured('find_composer_mode',()=>composerForm ? Array.from(composerForm.querySelectorAll('button[aria-haspopup]'))
+    .filter(b=>visible(b) && b.getAttribute('aria-label')!=='Select ChatGPT model' && modeWord.test(modeValue(b))) : []);
+  const instant = () => modelButtons.length === 1 && /\bInstant\b/.test(modeValue(modelButtons[0])) && composerPickers.every(b=>/^Instant\b/i.test(modeValue(b)));
   const draft = () => field ? ('value' in field ? field.value : field.innerText).trim() : '';
   const generating = () => Array.from(document.querySelectorAll('button[data-testid="stop-button"],button[aria-label="Stop"],button[aria-label="Stop generating"],button[aria-label="Stop streaming"]')).some(visible);
   const sendControl = () => {
@@ -187,6 +194,8 @@
       return reply({state:'instant'});
     }
     if (modelButtons.length !== 1) return reply({state:'mode_unavailable'});
+    // The message-box picker is left to the user: report it rather than click through an unknown menu.
+    if (composerPickers.some(b=>!/^Instant\b/i.test(modeValue(b)))) return reply({state:'mode_unavailable'});
     const sliders = Array.from(document.querySelectorAll('[role="menu"] [role="slider"]')).filter(visible);
     if (sliders.length === 1 && sliders[0].getAttribute('aria-valuemin') === '0' && sliders[0].getAttribute('aria-valuemax') === '2') {
       sliders[0].focus();
