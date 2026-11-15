@@ -2,7 +2,7 @@
 
 A native macOS English-to-Simplified-Chinese translator. Select text in another app to see a floating, Chinese-only translation panel. For text in images, scanned PDFs or inaccessible app views, explicitly select a screen region for local OCR.
 
-This repository contains the 0.2.3 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
+This repository contains the 0.2.4 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
 
 ## Features
 
@@ -65,7 +65,7 @@ Open TranslateGPT to show its controls. **Turn On / Turn Off** toggles automatic
 
 Select eligible English text in another app. Unsupported selections remain silent. Use **Control–Option–Command–T** for a region that needs OCR, drag a rectangle and release, or press Escape to cancel. The panel supports scrolling, copying the translation and closing.
 
-Safari must be running and signed in. The app creates and reuses its own minimized engine window and unpinned tab. Other ChatGPT tabs may stay in front. If an already submitted request loses its response page, the app reports an interruption and does not replay it automatically; select text again to start a new request.
+Safari must be running and signed in. The app creates and reuses its own minimized engine window and unpinned tab. Other ChatGPT tabs may stay in front. If an already submitted request loses its response page, the app reports an interruption and does not replay it automatically; select text again to start a new request. If ChatGPT shows neither output nor a Stop control for 20 seconds after a submission (for example after a website error), the app reports that the request got no response, does not resend it, and accepts your next selection.
 
 ## Privacy and limits
 

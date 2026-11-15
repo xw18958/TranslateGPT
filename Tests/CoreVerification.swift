@@ -171,6 +171,62 @@ actor FakeProgressTranslator: ProgressiveTranslationBackend {
         let afterLoss=try await interruption.translate("new explicit request")
         precondition(afterLoss=="新译文" && interruptedSends==2)
         print("PASS lost response document: immediate interruption, no automatic replay, no stuck protection; next explicit request succeeds")
+        func ready()->[String:Any] {["state":"ready","draft":false,"generating":false,"instant":true]}
+        reset()
+        var unansweredStarts=0
+        let unanswered=SafariDOMBackend(bridge:"test",defaults:defaults,targetProvider:{[.init(windowID:1,tabIndex:1)]},requestProvider:{_,r in
+            switch r["action"] {
+            case "inspect":return ready()
+            case "start":unansweredStarts+=1;return ["state":"sent"]
+            case "status":return unansweredStarts==1 ? ["state":"failed","failure":"no_response","safeUnsent":false,"text":""]:["state":"responding","text":"下一条译文","generating":false]
+            case "complete":return ["state":"completed"]
+            default:fatalError("unexpected no-response action")
+            }
+        },coordinatedJobs:true,pollInterval:0.002,settleInterval:0.006,responseTimeout:0.2)
+        do{_ = try await unanswered.translate("unanswered request");fatalError("unanswered request completed")}
+        catch{precondition(error.localizedDescription.hasPrefix("ChatGPT did not respond to this request. It was not resent."))}
+        precondition(unansweredStarts==1 && !defaults.bool(forKey:"TranslateGPT.domRequestUncertain"))
+        let afterUnanswered=try await unanswered.translate("next explicit request")
+        precondition(afterUnanswered=="下一条译文" && unansweredStarts==2)
+        reset()
+        defaults.set(true,forKey:"TranslateGPT.domRequestUncertain");defaults.set("earlier-job",forKey:"TranslateGPT.pendingJobID")
+        var settledYet=false,earlierActions=[String]()
+        let reconciling=SafariDOMBackend(bridge:"test",defaults:defaults,targetProvider:{[.init(windowID:1,tabIndex:1)]},requestProvider:{_,r in
+            earlierActions.append(r["action"]!)
+            switch r["action"] {
+            case "inspect":return ready()
+            case "recover_status","stop_owned":precondition(r["id"]=="earlier-job");return settledYet ? ["state":"failed","failure":"no_response","safeUnsent":false]:["state":"sent","text":"","generating":false,"stopReason":"stop_controls_0"]
+            case "start":return ["state":"sent"]
+            case "status":return ["state":"responding","text":"恢复后译文","generating":false]
+            case "complete":return ["state":"completed"]
+            default:fatalError("unexpected reconciliation action")
+            }
+        },coordinatedJobs:true,pollInterval:0.002,settleInterval:0.006,responseTimeout:0.2)
+        do{_ = try await reconciling.translate("too early");fatalError("unsettled earlier job was bypassed")}catch{}
+        precondition(!earlierActions.contains("start") && defaults.bool(forKey:"TranslateGPT.domRequestUncertain"))
+        settledYet=true;earlierActions=[]
+        let reconciled=try await reconciling.translate("after earlier job settled")
+        precondition(reconciled=="恢复后译文" && earlierActions.filter{$0=="start"}.count==1 && !earlierActions.contains("stop_owned"))
+        precondition(!defaults.bool(forKey:"TranslateGPT.domRequestUncertain"))
+        reset()
+        var idleStarts=0
+        let idleCancel=SafariDOMBackend(bridge:"test",defaults:defaults,targetProvider:{[.init(windowID:1,tabIndex:1)]},requestProvider:{_,r in
+            switch r["action"] {
+            case "inspect":return ready()
+            case "start":idleStarts+=1;return ["state":"sent"]
+            case "status":return idleStarts==1 ? ["state":"sent","text":"","generating":false]:["state":"responding","text":"最新译文","generating":false]
+            case "stop_owned":return ["state":"failed","failure":"no_response","safeUnsent":false]
+            case "complete":return ["state":"completed"]
+            default:fatalError("unexpected idle-cancel action")
+            }
+        },coordinatedJobs:true,pollInterval:0.002,settleInterval:0.006,responseTimeout:1)
+        let idleObsolete=Task{try await idleCancel.translate("unanswered obsolete")}
+        await wait{idleStarts==1};idleObsolete.cancel()
+        let idleNewest=Task{try await idleCancel.translate("newest after unanswered")}
+        do{_ = try await idleObsolete.value;fatalError("obsolete request returned")}catch is CancellationError {}catch{fatalError("unexpected idle cancellation error: \(error)")}
+        let newestAfterIdle=try await idleNewest.value
+        precondition(newestAfterIdle=="最新译文" && idleStarts==2 && !defaults.bool(forKey:"TranslateGPT.domRequestUncertain"))
+        print("PASS unanswered submitted job: reported once without resend, protection cleared only after page-confirmed end, waits while unsettled, cancellation and next explicit request proceed")
         print("PASS backend progress: observed response emitted immediately without artificial chunks")
         print("PASS Instant selection: higher reasoning mode changed before any submission")
     }

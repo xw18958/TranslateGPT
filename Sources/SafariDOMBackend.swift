@@ -71,27 +71,43 @@ enum EngineIdentity {
         defaults.set(false,forKey:pendingKey)
         throw Failure(message:"The previous translation was interrupted by Safari and was not resent. Select text again to start a new translation.")
     }
+    // Page-confirmed end states: no generation is running for the job. "failed" after Send means the
+    // page saw no response; the job is reported and never resent.
+    private static let finishedJobStates:Set<String>=["completed","stopped","failed"]
+    static func failedJobMessage(_ reason:String?)->String {
+        switch reason {
+        case "no_response": return "ChatGPT did not respond to this request. It was not resent. Select text again to start a new translation."
+        case "send_not_accepted": return "Translation Engine did not accept this request. It was not resent. Select text again to start a new translation."
+        default: return "Translation Engine changed or Send was unavailable. The request was not resent."
+        }
+    }
     private func reconcileUncertain() async throws {
-        guard coordinatedJobs,let id=defaults.string(forKey:"TranslateGPT.pendingJobID"),!ownedNonce.isEmpty else {
+        guard coordinatedJobs,let id=defaults.string(forKey:"TranslateGPT.pendingJobID"),targetProvider != nil || !ownedNonce.isEmpty else {
             throw Failure(message:"A previous request is unconfirmed. Check Translation Engine before resetting request protection.")
         }
-        guard let safari=NSRunningApplication.runningApplications(withBundleIdentifier:"com.apple.Safari").first,
-              defaults.integer(forKey:"TranslateGPT.engineSafariPID")==Int(safari.processIdentifier) else {try interruptPrevious()}
-        let window=defaults.integer(forKey:"TranslateGPT.engineWindow")
-        guard let index=try await locateOwnedTab(window:window) else {try interruptPrevious()}
-        let target=Target(windowID:window,tabIndex:index)
+        let target:Target
+        if let targetProvider {
+            guard let injected=try targetProvider().first else {try interruptPrevious()}
+            target=injected
+        } else {
+            guard let safari=NSRunningApplication.runningApplications(withBundleIdentifier:"com.apple.Safari").first,
+                  defaults.integer(forKey:"TranslateGPT.engineSafariPID")==Int(safari.processIdentifier) else {try interruptPrevious()}
+            let window=defaults.integer(forKey:"TranslateGPT.engineWindow")
+            guard let index=try await locateOwnedTab(window:window) else {try interruptPrevious()}
+            target=Target(windowID:window,tabIndex:index)
+        }
         var request=["action":"inspect","id":id]
         _ = try await call(target,request) // reload reinstalls the resident agent without sending
         request["action"]="recover_status"
         let state=try await call(target,request)
         let phase=state["state"] as? String ?? ""
-        if phase=="completed" || phase=="stopped" || state["safeUnsent"] as? Bool==true {defaults.set(false,forKey:pendingKey);return}
+        if Self.finishedJobStates.contains(phase) || state["safeUnsent"] as? Bool==true {defaults.set(false,forKey:pendingKey);return}
         if phase=="unknown_request" {try interruptPrevious()}
         request["action"]="stop_owned"
         let deadline=StageProfiler.now+2
         repeat {
             let stopped=try await call(target,request)
-            if stopped["state"] as? String=="stopped" {defaults.set(false,forKey:pendingKey);return}
+            if Self.finishedJobStates.contains(stopped["state"] as? String ?? "") {defaults.set(false,forKey:pendingKey);return}
             await pause(0.05)
         } while StageProfiler.now<deadline
         throw Failure(message:"The previous request is still finishing. Select text again shortly; it will not be resent.")
@@ -408,7 +424,7 @@ enum EngineIdentity {
                 while ["sent","sending","responding","stopping"].contains(stopped["state"] as? String ?? ""), StageProfiler.now<stopDeadline {
                     await pause(0.05);stopped=try await call(target,request)
                 }
-                if stopped["state"] as? String == "stopped" {
+                if Self.finishedJobStates.contains(stopped["state"] as? String ?? "") {
                     defaults.set(false,forKey:pendingKey)
                     throw CancellationError()
                 }
@@ -426,8 +442,10 @@ enum EngineIdentity {
                 timedSubmission=true
             }
             if response["state"] as? String == "failed" {
-                if response["safeUnsent"] as? Bool == true {defaults.set(false,forKey:pendingKey);attemptedSend=false}
-                throw Failure(message:"Translation Engine changed or Send was unavailable. The request was not resent.")
+                // A coordinated page job reports failure only when nothing is running for it.
+                if coordinatedJobs || response["safeUnsent"] as? Bool == true {defaults.set(false,forKey:pendingKey)}
+                if response["safeUnsent"] as? Bool == true {attemptedSend=false}
+                throw Failure(message:Self.failedJobMessage(response["failure"] as? String))
             }
             if coordinatedJobs,response["state"] as? String == "unknown_request" {try interruptPrevious()}
             let output=response["text"] as? String ?? ""

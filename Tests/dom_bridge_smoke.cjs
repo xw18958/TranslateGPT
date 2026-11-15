@@ -64,3 +64,21 @@ f=fixture();const clean=f.run({action:'inspect',owner:'proof',claim:'1'});assert
 for(const path of ['/c/00000000-0000-4000-8000-000000000001','/g/renamed-project/c/00000000-0000-4000-8000-000000000001/'])assert.equal(fixture('https://chatgpt.com'+path).run({action:'inspect'}).state,'ready');
 assert.equal(fixture('https://chatgpt.com/c/wrong?target=/c/00000000-0000-4000-8000-000000000001').run({action:'inspect'}).state,'wrong_page');assert.equal(fixture('https://chatgpt.com.evil.invalid/c/00000000-0000-4000-8000-000000000001').run({action:'inspect'}).state,'wrong_page');
 console.log('PASS recovery regressions: persistent ownership after real-context reload, changed-document zero-send guard, wrong-owner rejection, same-document unsent proof, lost-document no-replay, canonical route aliases and spoof isolation.');
+
+// No-response settlement: a submitted job that never answers must not block later explicit requests, and is never resent.
+const idleStart=id=>{const g=fixture();assert.equal(g.run({action:'start',owner:'idle',claim:'1',id,prompt:'Request ID: '+id}).state,'sent');assert.equal(g.button.clicks,1);return g;};
+f=idleStart('no-answer');f.field.value='';f.messages.push(msg('user','Request ID: no-answer'));f.notify();
+f.advance(19999);assert.equal(f.run({action:'status',owner:'idle',id:'no-answer'}).state,'sent');assert.equal(f.run({action:'stop_owned',owner:'idle',id:'no-answer'}).state,'sent');
+f.advance(2);let settled=f.run({action:'status',owner:'idle',id:'no-answer'});assert.equal(settled.state,'failed');assert.equal(settled.failure,'no_response');assert.equal(settled.safeUnsent,false);
+assert.equal(f.run({action:'recover_status',owner:'idle',id:'no-answer'}).state,'failed');assert.equal(f.button.clicks,1);
+assert.equal(f.run({action:'start',owner:'idle',id:'after-no-answer',prompt:'Request ID: after-no-answer'}).state,'sent');assert.equal(f.button.clicks,2);
+f=idleStart('slow-start');f.field.value='';f.messages.push(msg('user','Request ID: slow-start'));f.stops.push({getClientRects:()=>[1]});f.notify();
+f.advance(30000);assert.equal(f.run({action:'status',owner:'idle',id:'slow-start'}).state,'sent');
+f.stops.length=0;f.advance(19999);assert.equal(f.run({action:'status',owner:'idle',id:'slow-start'}).state,'sent');f.advance(2);assert.equal(f.run({action:'status',owner:'idle',id:'slow-start'}).failure,'no_response');
+f=idleStart('ignored-send');f.advance(20001);settled=f.run({action:'status',owner:'idle',id:'ignored-send'});assert.equal(settled.failure,'send_not_accepted');assert.equal(f.field.value,'');assert.equal(f.button.clicks,1);
+f=idleStart('user-edited');f.field.value='user typing';f.advance(20001);settled=f.run({action:'status',owner:'idle',id:'user-edited'});assert.equal(settled.failure,'no_response');assert.equal(f.field.value,'user typing');
+f=idleStart('answered');f.field.value='';f.messages.push(msg('user','Request ID: answered'),msg('assistant','译文'));f.notify();f.advance(60000);assert.equal(f.run({action:'status',owner:'idle',id:'answered'}).state,'responding');
+f=idleStart('unpolled');f.field.value='';f.messages.push(msg('user','Request ID: unpolled'));f.notify();
+assert.equal(f.run({action:'start',owner:'idle',id:'too-early',prompt:'Request ID: too-early'}).state,'occupied');assert.equal(f.button.clicks,1);
+f.advance(20001);assert.equal(f.run({action:'start',owner:'idle',id:'later',prompt:'Request ID: later'}).state,'sent');assert.equal(f.button.clicks,2);
+console.log('PASS no-response settlement: unanswered submitted job fails after 20 s without Stop, visible generation extends it, only our exact unaccepted draft is removed, answered jobs unaffected, next explicit Start allowed; no automatic resend.');

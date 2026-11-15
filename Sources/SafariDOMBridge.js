@@ -32,8 +32,9 @@
   }
   if (r.action==='start') {
     if (existing && existing.id===r.id) return reply(existing.snapshot());
+    if (existing && existing.settle) existing.settle();
     if (existing && !['completed','stopped','failed'].includes(existing.state)) return reply({state:'occupied',safeUnsent:true});
-    const job={started:clock(),prepareMs:0,readyWaitMs:0,sendMs:0,sentAt:null,id:r.id,owner:r.owner,state:'preparing',text:'',generating:false,sent:false,firstOutputAt:null,deadline:clock()+4000};
+    const job={started:clock(),prepareMs:0,readyWaitMs:0,sendMs:0,sentAt:null,lastActiveAt:null,failure:null,id:r.id,owner:r.owner,state:'preparing',text:'',generating:false,sent:false,firstOutputAt:null,deadline:clock()+4000};
     window[key]=job;
     let observer,answer=null,user=null,semanticAnswer=false,scheduled=false,checking=false;
     const valid=()=>allowed.has(pageURL()) && (!r.owner || window.__TranslateGPTOwner===r.owner) && window[key]===job;
@@ -41,7 +42,7 @@
     const normalized=t=>t.replace(/\s+/g,' ').trim();
     const requestText=e=>{const text=e.innerText,index=text.indexOf('Request ID: '+r.id);return index>=0 ? normalized(text.slice(index)) : '';};
     const semanticUsers=()=>Array.from(document.querySelectorAll('h4')).filter(e=>e.innerText.trim()==='You said:').map(e=>e.parentElement);
-    job.snapshot=()=>{if(['preparing','waitingReady'].includes(job.state) && clock()>job.deadline){invoke('cancel_prepared');finish('failed');}return ({state:job.state,text:job.text,generating:job.generating,safeUnsent:!job.sent,firstOutputAt:job.firstOutputAt,pageNow:clock(),prepareMs:job.prepareMs,readyWaitMs:job.readyWaitMs,sendMs:job.sendMs,sentAt:job.sentAt,completionEvidence:!!job.completionEvidence,stopReason:job.stopReason||null,submittedMatches:!!job.submittedMatches,submissionCount:job.submissionCount||0,owned:true});};
+    job.snapshot=()=>{if(['preparing','waitingReady'].includes(job.state) && clock()>job.deadline){invoke('cancel_prepared');finish('failed');}job.settle();return ({state:job.state,failure:job.failure,text:job.text,generating:job.generating,safeUnsent:!job.sent,firstOutputAt:job.firstOutputAt,pageNow:clock(),prepareMs:job.prepareMs,readyWaitMs:job.readyWaitMs,sendMs:job.sendMs,sentAt:job.sentAt,completionEvidence:!!job.completionEvidence,stopReason:job.stopReason||null,submittedMatches:!!job.submittedMatches,submissionCount:job.submissionCount||0,owned:true});};
     const finish=state=>{job.state=state;observer.disconnect();};
     const changed=()=>{
       if (checking || !valid()) {if(!valid()) finish('failed');return;}
@@ -73,7 +74,7 @@
         const output=answer ? (semanticAnswer ? answer.innerText.replace(/^\s*ChatGPT said:\s*/,'').trim() : answer.innerText.trim()) : '';
         const active=Array.from(document.querySelectorAll('button[data-testid="stop-button"],button[aria-label="Stop"],button[aria-label="Stop generating"],button[aria-label="Stop streaming"]')).some(e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=='hidden');
         job.generating=active;
-        if(active)job.sawGeneration=true;
+        if(active){job.sawGeneration=true;job.lastActiveAt=clock();}
         const turn=answer && answer.closest ? answer.closest('[data-testid^="conversation-turn-"]') : null;
         const copy=turn ? Array.from(turn.querySelectorAll('button[data-testid="copy-turn-action-button"]')).filter(e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=='hidden' && !e.disabled) : [];
         job.completionEvidence=!!(job.sawGeneration && output && !active && copy.length===1);
@@ -96,6 +97,17 @@
       if(stops.length!==1){job.stopReason='stop_controls_'+stops.length;return;}
       if(job.state!=='stopping'){job.stopReason='clicked';job.state='stopping';stops[0].click();}
       changed();
+    };
+    // A submitted job with no output and no visible generation for 20 s is finished: nothing is
+    // running for it. Mark it failed so it cannot block later explicit requests. Never resend it.
+    job.settle=()=>{
+      if(job.state!=='sent' || job.text || clock()-Math.max(job.sentAt||job.started,job.lastActiveAt||0)<20000)return;
+      changed();
+      if(job.state!=='sent' || job.text)return;
+      if(job.generating){job.lastActiveAt=clock();return;}
+      // Send was not accepted only if our exact prompt is still the draft; cancel_prepared removes nothing else.
+      job.failure=!user && invoke('cancel_prepared').state==='cancelled' ? 'send_not_accepted':'no_response';
+      finish('failed');
     };
     observer=new MutationObserver(()=>{if(!scheduled){scheduled=true;queueMicrotask(()=>{scheduled=false;changed();});}});
     observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['disabled','aria-disabled','data-state']});
