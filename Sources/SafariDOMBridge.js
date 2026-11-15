@@ -32,8 +32,9 @@
   }
   if (r.action==='start') {
     if (existing && existing.id===r.id) return reply(existing.snapshot());
+    if (existing && existing.settle) existing.settle();
     if (existing && !['completed','stopped','failed'].includes(existing.state)) return reply({state:'occupied',safeUnsent:true});
-    const job={started:clock(),prepareMs:0,readyWaitMs:0,sendMs:0,sentAt:null,id:r.id,owner:r.owner,state:'preparing',text:'',generating:false,sent:false,firstOutputAt:null,deadline:clock()+4000};
+    const job={started:clock(),prepareMs:0,readyWaitMs:0,sendMs:0,sentAt:null,lastActiveAt:null,failure:null,id:r.id,owner:r.owner,state:'preparing',text:'',generating:false,sent:false,firstOutputAt:null,deadline:clock()+4000};
     window[key]=job;
     let observer,answer=null,user=null,semanticAnswer=false,scheduled=false,checking=false;
     const valid=()=>allowed.has(pageURL()) && (!r.owner || window.__TranslateGPTOwner===r.owner) && window[key]===job;
@@ -41,7 +42,55 @@
     const normalized=t=>t.replace(/\s+/g,' ').trim();
     const requestText=e=>{const text=e.innerText,index=text.indexOf('Request ID: '+r.id);return index>=0 ? normalized(text.slice(index)) : '';};
     const semanticUsers=()=>Array.from(document.querySelectorAll('h4')).filter(e=>e.innerText.trim()==='You said:').map(e=>e.parentElement);
-    job.snapshot=()=>{if(['preparing','waitingReady'].includes(job.state) && clock()>job.deadline){invoke('cancel_prepared');finish('failed');}return ({state:job.state,text:job.text,generating:job.generating,safeUnsent:!job.sent,firstOutputAt:job.firstOutputAt,pageNow:clock(),prepareMs:job.prepareMs,readyWaitMs:job.readyWaitMs,sendMs:job.sendMs,sentAt:job.sentAt,completionEvidence:!!job.completionEvidence,stopReason:job.stopReason||null,submittedMatches:!!job.submittedMatches,submissionCount:job.submissionCount||0,owned:true});};
+    // Rebuild the rendered reply as Markdown so paragraphs, lists, headings, emphasis and code survive.
+    // Reads only the matched reply; skips controls, hidden and screen-reader-only text. Callers fall back to innerText.
+    const markdownOf=root=>{
+      const cls=(e,c)=>!!(e.classList && e.classList.contains && e.classList.contains(c));
+      const skip=e=>/^(BUTTON|SVG|STYLE|SCRIPT|TEMPLATE|NOSCRIPT|IMG)$/.test(e.tagName) || e.hidden===true || cls(e,'sr-only')
+        || (e.getAttribute && e.getAttribute('aria-hidden')==='true') || (e.tagName==='H4' && /^(You said:|ChatGPT said:)$/.test((e.textContent||'').trim()));
+      const isBlock=e=>/^(P|DIV|SECTION|ARTICLE|UL|OL|LI|H[1-6]|PRE|BLOCKQUOTE|TABLE|THEAD|TBODY|TR|HR)$/.test(e.tagName);
+      const inline=n=>{
+        if(n.nodeType===3)return (n.nodeValue||'').replace(/\s+/g,' ');
+        if(n.nodeType!==1 || skip(n))return '';
+        if(cls(n,'katex-display')){const tex=n.querySelector && n.querySelector('annotation');if(tex)return '$$'+tex.textContent+'$$';}
+        if(cls(n,'katex')){const tex=n.querySelector && n.querySelector('annotation');return tex ? '$'+tex.textContent+'$' : (n.textContent||'');}
+        if(n.tagName==='BR')return '\n';
+        if(n.tagName==='CODE')return '`'+(n.textContent||'')+'`';
+        const inner=Array.from(n.childNodes||[]).map(inline).join('');
+        if(!inner.trim())return inner;
+        if(n.tagName==='STRONG' || n.tagName==='B')return '**'+inner.trim()+'**';
+        if(n.tagName==='EM' || n.tagName==='I')return '*'+inner.trim()+'*';
+        return inner;
+      };
+      const blocks=[];
+      const walk=(node,ctx)=>{
+        let para='';
+        const emit=(text,tight)=>{
+          const pad=ctx.marker ? ' '.repeat(ctx.marker.length) : '';
+          const lead=ctx.indent+(ctx.marker && !ctx.used ? ctx.marker : pad);ctx.used=true;
+          blocks.push({text:lead+text.replace(/\n/g,'\n'+ctx.indent+pad),tight:tight || !!ctx.marker});
+        };
+        const flush=()=>{const s=para.replace(/[ \t]*\n[ \t]*/g,'\n').trim();para='';if(s)emit(s);};
+        for(const c of Array.from(node.childNodes||[])){
+          if(c.nodeType===1 && skip(c))continue;
+          if(c.nodeType!==1 || !isBlock(c)){para+=inline(c);continue;}
+          flush();
+          const t=c.tagName,inner=ctx.indent+(ctx.marker ? ' '.repeat(ctx.marker.length) : '');
+          if(t==='UL' || t==='OL'){let k=0;for(const li of Array.from(c.children||[])){if(li.tagName!=='LI')continue;k++;walk(li,{indent:inner,marker:t==='OL' ? k+'. ':'- ',used:false});}}
+          else if(/^H[1-6]$/.test(t)){const s=inline(c).trim();if(s)emit('#'.repeat(+t[1])+' '+s);}
+          else if(t==='PRE'){const code=(c.querySelector && c.querySelector('code')) || c,lang=((code.getAttribute && code.getAttribute('class'))||'').match(/language-([\w+-]+)/);emit('```'+(lang ? lang[1]:'')+'\n'+(code.textContent||'').replace(/\n$/,'')+'\n```');}
+          else if(t==='BLOCKQUOTE'){const start=blocks.length;walk(c,ctx);for(let i=start;i<blocks.length;i++)blocks[i].text='> '+blocks[i].text.replace(/\n/g,'\n> ');}
+          else if(t==='HR')emit('---');
+          else if(t==='TR')emit('| '+Array.from(c.children||[]).map(cell=>inline(cell).trim()).join(' | ')+' |',true);
+          else walk(c,ctx);
+        }
+        flush();
+      };
+      walk(root,{indent:'',marker:null,used:false});
+      return blocks.map((b,i)=>(i===0 ? '' : (blocks[i-1].tight && b.tight ? '\n':'\n\n'))+b.text).join('').trim();
+    };
+    const replyText=e=>{let md='';try{md=markdownOf(e);}catch(_){}return md || (semanticAnswer ? e.innerText.replace(/^\s*ChatGPT said:\s*/,'').trim() : e.innerText.trim());};
+    job.snapshot=()=>{if(['preparing','waitingReady'].includes(job.state) && clock()>job.deadline){invoke('cancel_prepared');finish('failed');}job.settle();return ({state:job.state,failure:job.failure,text:job.text,generating:job.generating,safeUnsent:!job.sent,firstOutputAt:job.firstOutputAt,pageNow:clock(),prepareMs:job.prepareMs,readyWaitMs:job.readyWaitMs,sendMs:job.sendMs,sentAt:job.sentAt,completionEvidence:!!job.completionEvidence,stopReason:job.stopReason||null,submittedMatches:!!job.submittedMatches,submissionCount:job.submissionCount||0,owned:true});};
     const finish=state=>{job.state=state;observer.disconnect();};
     const changed=()=>{
       if (checking || !valid()) {if(!valid()) finish('failed');return;}
@@ -70,10 +119,10 @@
           }
           if(user)job.submittedMatches=requestText(user)===normalized(r.prompt);
         }
-        const output=answer ? (semanticAnswer ? answer.innerText.replace(/^\s*ChatGPT said:\s*/,'').trim() : answer.innerText.trim()) : '';
+        const output=answer ? replyText(answer) : '';
         const active=Array.from(document.querySelectorAll('button[data-testid="stop-button"],button[aria-label="Stop"],button[aria-label="Stop generating"],button[aria-label="Stop streaming"]')).some(e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=='hidden');
         job.generating=active;
-        if(active)job.sawGeneration=true;
+        if(active){job.sawGeneration=true;job.lastActiveAt=clock();}
         const turn=answer && answer.closest ? answer.closest('[data-testid^="conversation-turn-"]') : null;
         const copy=turn ? Array.from(turn.querySelectorAll('button[data-testid="copy-turn-action-button"]')).filter(e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=='hidden' && !e.disabled) : [];
         job.completionEvidence=!!(job.sawGeneration && output && !active && copy.length===1);
@@ -96,6 +145,17 @@
       if(stops.length!==1){job.stopReason='stop_controls_'+stops.length;return;}
       if(job.state!=='stopping'){job.stopReason='clicked';job.state='stopping';stops[0].click();}
       changed();
+    };
+    // A submitted job with no output and no visible generation for 20 s is finished: nothing is
+    // running for it. Mark it failed so it cannot block later explicit requests. Never resend it.
+    job.settle=()=>{
+      if(job.state!=='sent' || job.text || clock()-Math.max(job.sentAt||job.started,job.lastActiveAt||0)<20000)return;
+      changed();
+      if(job.state!=='sent' || job.text)return;
+      if(job.generating){job.lastActiveAt=clock();return;}
+      // Send was not accepted only if our exact prompt is still the draft; cancel_prepared removes nothing else.
+      job.failure=!user && invoke('cancel_prepared').state==='cancelled' ? 'send_not_accepted':'no_response';
+      finish('failed');
     };
     observer=new MutationObserver(()=>{if(!scheduled){scheduled=true;queueMicrotask(()=>{scheduled=false;changed();});}});
     observer.observe(document.documentElement,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['disabled','aria-disabled','data-state']});

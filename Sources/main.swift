@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import ApplicationServices
 import Combine
+import WebKit
 
 enum BackendError: LocalizedError {
     case unavailable
@@ -31,6 +32,7 @@ final class TranslateModel: ObservableObject {
     @Published var active = false
     @Published var hasTranslation = false
     @Published var isLoading = false
+    @Published var accessibilityTrusted = true
     private var requestID = UUID()
     private var task: Task<Void, Never>?
     private var cache: [String: String] = [:]
@@ -106,8 +108,140 @@ final class TranslateModel: ObservableObject {
     }
 }
 
+// Turns common LaTeX into readable Unicode math: \alpha_{\min} → α_min, r_i → rᵢ, \frac{a}{b} → a/b.
+enum MathText {
+    static let symbols:[String:String]=["alpha":"α","beta":"β","gamma":"γ","delta":"δ","epsilon":"ε","varepsilon":"ε","zeta":"ζ","eta":"η","theta":"θ","lambda":"λ","mu":"μ","nu":"ν","xi":"ξ","pi":"π","rho":"ρ","sigma":"σ","tau":"τ","phi":"φ","varphi":"φ","chi":"χ","psi":"ψ","omega":"ω",
+        "Gamma":"Γ","Delta":"Δ","Theta":"Θ","Lambda":"Λ","Pi":"Π","Sigma":"Σ","Phi":"Φ","Psi":"Ψ","Omega":"Ω","le":"≤","leq":"≤","ge":"≥","geq":"≥","neq":"≠","ne":"≠","approx":"≈","times":"×","cdot":"·","pm":"±",
+        "in":"∈","sum":"∑","prod":"∏","int":"∫","infty":"∞","partial":"∂","nabla":"∇","to":"→","rightarrow":"→","leftarrow":"←","sim":"∼","propto":"∝","odot":"⊙","otimes":"⊗","oplus":"⊕","ldots":"…","cdots":"⋯",
+        "min":"min","max":"max","log":"log","exp":"exp","arg":"arg","sqrt":"√","quad":" ","qquad":"  ","left":"","right":"",",":" ",";":" "]
+    static let sub:[Character:Character]=["0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉","i":"ᵢ","j":"ⱼ","k":"ₖ","n":"ₙ","t":"ₜ","+":"₊","-":"₋","a":"ₐ","e":"ₑ","o":"ₒ","x":"ₓ","m":"ₘ","l":"ₗ","s":"ₛ","p":"ₚ","r":"ᵣ","u":"ᵤ","v":"ᵥ","h":"ₕ"]
+    static let sup:[Character:Character]=["0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","n":"ⁿ","i":"ⁱ","T":"ᵀ","t":"ᵗ","k":"ᵏ"]
+    // Symbols, fractions and accents become Unicode; _ and ^ stay as markers for attributed().
+    static func normalized(_ tex: String) -> String {
+        var s=tex
+        for (name,mark) in [("tilde","\u{303}"),("widetilde","\u{303}"),("hat","\u{302}"),("widehat","\u{302}"),("bar","\u{304}"),("overline","\u{305}"),("dot","\u{307}"),("vec","\u{20D7}")] {
+            s=s.replacingOccurrences(of:"\\\\"+name+#"\{(\\?[A-Za-z]+)\}"#,with:"$1"+mark,options:.regularExpression)
+            s=s.replacingOccurrences(of:"\\\\"+name+#" ?([A-Za-z])"#,with:"$1"+mark,options:.regularExpression)
+        }
+        s=s.replacingOccurrences(of:#"\\(?:mathrm|text|mathbf|mathit|operatorname|boldsymbol|mathcal|mathbb)\{([^{}]*)\}"#,with:"$1",options:.regularExpression)
+        for _ in 0..<3 { s=s.replacingOccurrences(of:#"\\(?:frac|dfrac|tfrac)\{((?:[^{}]|\{[^{}]*\})*)\}\{((?:[^{}]|\{[^{}]*\})*)\}"#,with:"($1)/($2)",options:.regularExpression) }
+        s=s.replacingOccurrences(of:#"\\([A-Za-z]+|[,;!])"#,with:"\u{1}$1\u{2}",options:.regularExpression)
+        for (name,value) in symbols { s=s.replacingOccurrences(of:"\u{1}"+name+"\u{2}",with:value) }
+        s=s.replacingOccurrences(of:"\u{1}ell\u{2}",with:"ℓ").replacingOccurrences(of:"\u{1}!\u{2}",with:"")
+        s=s.replacingOccurrences(of:#"\x{1}([A-Za-z]+)\x{2}"#,with:"$1",options:.regularExpression)
+        s=s.replacingOccurrences(of:#"(?<![_^])\(([A-Za-z0-9α-ωℓ]+)\)/\(([A-Za-z0-9α-ωℓ]+)\)"#,with:"$1/$2",options:.regularExpression)
+        return s.replacingOccurrences(of:"-",with:"−")
+    }
+    static func readable(_ tex: String) -> String { String(attributed(tex).characters) }
+    // Real subscripts and superscripts (any letters, e.g. q with "low" below and "high" above) via smaller, shifted text.
+    static func attributed(_ tex: String) -> AttributedString {
+        let s=Array(normalized(tex)); var out=AttributedString(), plain="", i=0
+        func flush() { if !plain.isEmpty { out.append(AttributedString(plain.replacingOccurrences(of:"{",with:"").replacingOccurrences(of:"}",with:""))); plain="" } }
+        while i<s.count {
+            let c=s[i]
+            guard (c=="_" || c=="^"), i+1<s.count else { plain.append(c); i+=1; continue }
+            var body="", j=i+1
+            if s[j]=="{" { var depth=0; while j<s.count { if s[j]=="{" { depth+=1; if depth==1 { j+=1; continue } } else if s[j]=="}" { depth-=1; if depth==0 { j+=1; break } }; body.append(s[j]); j+=1 } }
+            else { body=String(s[j]); j+=1 }
+            flush()
+            var piece=AttributedString(body.replacingOccurrences(of:"{",with:"").replacingOccurrences(of:"}",with:"").replacingOccurrences(of:"_",with:"").replacingOccurrences(of:"^",with:""))
+            piece[AttributeScopes.SwiftUIAttributes.FontAttribute.self]=Font.system(size:10)
+            piece[AttributeScopes.SwiftUIAttributes.BaselineOffsetAttribute.self]=c=="_" ? -4:6
+            out.append(piece); i=j
+        }
+        flush(); return out
+    }
+    // x_{ab} → x with Unicode subscripts when every character has one, else x_ab.
+    static func script(_ s:String,_ mark:Character,_ table:[Character:Character]) -> String {
+        var out="",i=s.startIndex
+        while i<s.endIndex {
+            guard s[i]==mark, s.index(after:i)<s.endIndex else { out.append(s[i]); i=s.index(after:i); continue }
+            var j=s.index(after:i), body=""
+            if s[j]=="{", let close=s[j...].firstIndex(of:"}") { body=String(s[s.index(after:j)..<close]); j=s.index(after:close) }
+            else { body=String(s[j]); j=s.index(after:j) }
+            let mapped=body.compactMap { table[$0] }
+            out += mapped.count==body.count && !body.isEmpty ? String(mapped) : String(mark)+body
+            i=j
+        }
+        return out
+    }
+}
+
+// Renders the Markdown subset the page agent produces: paragraphs, lists, headings, quotes, emphasis and code.
+// Inline emphasis is parsed here rather than with CommonMark, whose flanking rules leave `**粗体：**后文` unbolded.
+enum TranslationFormatting {
+    static func attributed(_ markdown: String) -> AttributedString {
+        var out=AttributedString(), inCode=false, first=true
+        for raw in markdown.components(separatedBy:"\n") {
+            if raw.trimmingCharacters(in:.whitespaces).hasPrefix("```") { inCode.toggle(); continue }
+            var line: AttributedString
+            if inCode { line=AttributedString(raw); line.inlinePresentationIntent = .code }
+            else {
+                let (prefix,body,heading)=parts(raw)
+                line=AttributedString(prefix)
+                var rest=inline(body)
+                if heading { rest.inlinePresentationIntent = .stronglyEmphasized }
+                line.append(rest)
+            }
+            if !first { out.append(AttributedString("\n")) }
+            out.append(line); first=false
+        }
+        return out
+    }
+    static func plain(_ markdown: String) -> String { String(attributed(markdown).characters) }
+    // List markers become bullets, heading hashes are removed, quotes get a bar.
+    static func parts(_ line: String) -> (String,String,Bool) {
+        let indent=String(line.prefix { $0==" " }), rest=line.dropFirst(indent.count)
+        if let m=rest.range(of:#"^[-*+] "#,options:.regularExpression) { return (indent+"• ",String(rest[m.upperBound...]),false) }
+        if let m=rest.range(of:#"^\d{1,3}[.)] "#,options:.regularExpression) { return (indent+String(rest[m]),String(rest[m.upperBound...]),false) }
+        if let m=rest.range(of:#"^#{1,6} "#,options:.regularExpression) { return (indent,String(rest[m.upperBound...]),true) }
+        if let m=rest.range(of:#"^> ?"#,options:.regularExpression) { return (indent+"┃ ",String(rest[m.upperBound...]),false) }
+        return (indent,String(rest),false)
+    }
+    static func inline(_ text: String) -> AttributedString {
+        var out=AttributedString(), plain="", i=text.startIndex
+        func flush() { if !plain.isEmpty { out.append(AttributedString(plain)); plain="" } }
+        while i<text.endIndex {
+            let after=text.index(after:i)
+            if text[i]=="$" {
+                let double=text[i...].hasPrefix("$$"), start=text.index(i,offsetBy:double ? 2:1)
+                if start<=text.endIndex, let close=text[start...].range(of:double ? "$$":"$"), close.lowerBound>start {
+                    flush(); let math=MathText.attributed(String(text[start..<close.lowerBound]))
+                    out.append(math); i=close.upperBound; continue
+                }
+            }
+            if text[i]=="`", after<text.endIndex, let close=text[after...].firstIndex(of:"`") {
+                flush(); var code=AttributedString(String(text[after..<close])); code.inlinePresentationIntent = .code
+                out.append(code); i=text.index(after:close); continue
+            }
+            if text[i...].hasPrefix("**"), let close=text[text.index(i,offsetBy:2)...].range(of:"**"), close.lowerBound>text.index(i,offsetBy:2) {
+                flush(); var bold=inline(String(text[text.index(i,offsetBy:2)..<close.lowerBound])); bold.inlinePresentationIntent = .stronglyEmphasized
+                out.append(bold); i=close.upperBound; continue
+            }
+            if text[i]=="*", after<text.endIndex, !text[after].isWhitespace, text[after] != "*",
+               let close=text[after...].firstIndex(of:"*"), close>after, !text[text.index(before:close)].isWhitespace {
+                flush(); var italic=inline(String(text[after..<close])); italic.inlinePresentationIntent = .emphasized
+                out.append(italic); i=text.index(after:close); continue
+            }
+            plain.append(text[i]); i=after
+        }
+        flush(); return out
+    }
+}
+
+// Hosts the shared translation web view; it stays in the hierarchy and is hidden while status text shows.
+struct TranslationWebPane: NSViewRepresentable {
+    let web: TranslationWebView
+    let visible: Bool
+    func makeNSView(context: Context) -> WKWebView { web.view }
+    func updateNSView(_ view: WKWebView, context: Context) { view.isHidden = !visible }
+}
+
 struct TranslationPopup: View {
     @ObservedObject var model: TranslateModel
+    let web: TranslationWebView
+    // Translations (also while streaming) are typeset in the web view; English status and error messages stay plain.
+    static func typeset(_ model: TranslateModel) -> Bool { (model.hasTranslation || model.isLoading) && !model.output.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -129,40 +263,50 @@ struct TranslationPopup: View {
                 .foregroundStyle(.secondary)
             }
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    if model.isLoading && model.output.isEmpty {
-                        HStack(spacing: 7) {
-                            ProgressView().controlSize(.small)
-                            Text("Translating…")
+            ZStack(alignment: .topLeading) {
+                TranslationWebPane(web: web, visible: Self.typeset(model))
+                if !Self.typeset(model) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            if model.isLoading && model.output.isEmpty {
+                                HStack(spacing: 7) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Translating…")
+                                }
+                                .foregroundStyle(.secondary)
+                            } else {
+                                Text(model.output)
+                                    .font(.system(size: 15))
+                                    .lineSpacing(2)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
-                        .foregroundStyle(.secondary)
-                    } else {
-                        Text(model.output)
-                            .font(.system(size: 15))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        if model.isLoading { ProgressView().controlSize(.small).accessibilityLabel("Receiving translation") }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .overlay(alignment: .bottomTrailing) {
+                if Self.typeset(model) && model.isLoading { ProgressView().controlSize(.small).accessibilityLabel("Receiving translation") }
+            }
             HStack {
                 Text("ChatGPT · Translation Engine")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button("Copy translation") {
+                    // Plain text keeps line breaks and bullets; Markdown-aware apps also get the formatting.
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(model.output, forType: .string)
+                    NSPasteboard.general.setString(TranslationFormatting.plain(model.output), forType: .string)
+                    NSPasteboard.general.setString(model.output, forType: NSPasteboard.PasteboardType("net.daringfireball.markdown"))
                 }
                 .buttonStyle(.borderless)
                 .disabled(!model.hasTranslation)
             }
         }
         .padding(15)
-        .frame(width: 430, height: 250)
+        .frame(minWidth: 300, maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
     }
 }
@@ -171,6 +315,7 @@ struct TranslationControls: View {
     @ObservedObject var model: TranslateModel
     let toggle: () -> Void
     let quit: () -> Void
+    let openAccessibility: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -189,6 +334,15 @@ struct TranslationControls: View {
                 .foregroundStyle(model.active ? Color.green : Color.secondary)
             Text("Select English text in another app to translate it. For images or inaccessible text, use Control–Option–Command–T.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if !model.accessibilityTrusted {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Accessibility permission is not in effect, so selected text cannot be read.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout.weight(.semibold)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    Text("Turn on TranslateGPT in System Settings → Privacy & Security → Accessibility. If it is already on, select it, click –, add it again with +, then reopen TranslateGPT.")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button("Open Accessibility Settings", action: openAccessibility)
+                }
+            }
             HStack {
                 Button(model.active ? "Turn Off" : "Turn On", action: toggle)
                     .buttonStyle(.borderedProminent).controlSize(.large)
@@ -224,13 +378,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let hotKey=OCRHotKey()
     private var hotKeyAvailable=false
     private var activationObserver: NSObjectProtocol?
+    private var trustTimer: Timer?
+    private var outputObserver: AnyCancellable?
+    private var web: TranslationWebView!
+    private var renderProbe: TranslationWebView?
+    // Panel chrome around the translation: padding, header, dividers and footer.
+    private static let panelChrome: CGFloat = 124
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--render-check") { NSApp.setActivationPolicy(.accessory); runRenderCheck(); return }
         NSApp.setActivationPolicy(.regular)
+        web = TranslationWebView()
 
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 430, height: 250),
-            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
+            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -243,8 +405,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: TranslationPopup(model: model))
+        let popup = NSHostingView(rootView: TranslationPopup(model: model, web: web))
+        popup.sizingOptions = [] // the panel size is set by fitPanel or by the user, not by SwiftUI's ideal size
+        window.contentView = popup
+        window.minSize = NSSize(width: 300, height: 200)
         panel = window
+        web.onHeight = { [weak self] height in self?.growPanel(width: 0, height: height + Self.panelChrome) }
+        outputObserver = Publishers.CombineLatest3(model.$output, model.$hasTranslation, model.$isLoading)
+            .receive(on: DispatchQueue.main).sink { [weak self] text, translated, loading in
+                MainActor.assumeIsolated { guard let self else { return }; self.present(text, typeset: (translated || loading) && !text.isEmpty) }
+            }
+        // Load Temml shortly after launch so the first formula does not wait for it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { MainActor.assumeIsolated { MathRenderer.shared.warm() } }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "character.book.closed.fill", accessibilityDescription: "TranslateGPT")
@@ -261,6 +433,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         exclude.target=self;exclude.tag=101;menu.addItem(exclude)
         let exclusions=NSMenuItem(title:"Excluded apps",action:nil,keyEquivalent:"")
         exclusions.submenu=NSMenu();exclusions.tag=102;menu.addItem(exclusions)
+        let copyFallback=NSMenuItem(title:"Copy fallback when selection is unreadable",action:#selector(toggleCopyFallback(_:)),keyEquivalent:"")
+        copyFallback.target=self;copyFallback.state=settings.copyFallback ? .on:.off;copyFallback.toolTip="Only when Accessibility cannot read a selection: press ⌘C, translate the copied text, then restore your clipboard.";menu.addItem(copyFallback)
         let ocr=NSMenuItem(title:hotKeyAvailable ? "Translate screen region":"Translate screen region (shortcut unavailable)",action:#selector(beginOCR),keyEquivalent:"t")
         ocr.target=self;ocr.keyEquivalentModifierMask=[.control,.option,.command];menu.addItem(ocr)
         menu.addItem(.separator())
@@ -295,9 +469,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controlWindow.isReleasedWhenClosed=false
         let controls=NSHostingView(rootView:TranslationControls(model:model,
             toggle:{ [weak self] in self?.setAutomaticTranslation(!(self?.settings.enabled ?? false)) },
-            quit:{ [weak self] in self?.quitApp() }))
+            quit:{ [weak self] in self?.quitApp() },
+            openAccessibility:{ [weak self] in self?.openPermissions() }))
+        model.accessibilityTrusted=AXIsProcessTrusted()
         controlWindow.contentView=controls
         controlWindow.setContentSize(controls.fittingSize)
+        // Permission can be granted or lose effect while running; the check is a cheap local call.
+        trustTimer=Timer.scheduledTimer(withTimeInterval:2,repeats:true) { [weak self] _ in
+            MainActor.assumeIsolated { guard let self else { return }; self.refreshAccessibilityTrust() }
+        }
         controlWindow.center()
         showControls()
 
@@ -370,8 +550,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT accessibilityTrusted=\(AXIsProcessTrusted())"); fflush(stdout) }
+        if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT accessibilityTrusted=\(AXIsProcessTrusted()) screenCaptureAllowed=\(CGPreflightScreenCaptureAccess())"); fflush(stdout) }
         if !AXIsProcessTrusted() { askForAccessibility() }
+    }
+
+    private func refreshAccessibilityTrust() {
+        let trusted=AXIsProcessTrusted()
+        guard trusted != model.accessibilityTrusted else { return }
+        model.accessibilityTrusted=trusted
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let content=self.controlWindow?.contentView else { return }
+            self.controlWindow.setContentSize(content.fittingSize)
+        }
     }
 
     private func askForAccessibility() {
@@ -402,13 +592,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               currentExternalApp()?.pid==app.pid, sameWindow(window,app:app), settings.permits(app) else { return }
         let from=ScreenCoordinates.quartz(start), end=ScreenCoordinates.quartz(point)
         extractionTask=Task {
-            let result=await Task.detached(priority:.userInitiated) {
-                StageProfiler.measure("selected_text_extraction") {
-                    SelectionExtractor(access:AXSelectionAccess(pid:app.pid)).read(start:from,end:end)
-                }
-            }.value
-            guard !Task.isCancelled, epoch==self.selectionEpoch,
-                  self.currentExternalApp()?.pid==app.pid,self.sameWindow(window,app:app),self.settings.permits(app) else { return }
+            func extract() async -> SelectedContent {
+                await Task.detached(priority:.userInitiated) {
+                    StageProfiler.measure("selected_text_extraction") {
+                        SelectionExtractor(access:AXSelectionAccess(pid:app.pid)).read(start:from,end:end)
+                    }
+                }.value
+            }
+            @MainActor func current() -> Bool {
+                guard !Task.isCancelled, epoch==self.selectionEpoch else { return false }
+                guard self.currentExternalApp()?.pid==app.pid, self.sameWindow(window,app:app) else { return false }
+                return self.settings.permits(app)
+            }
+            var result=await extract()
+            guard current() else { return }
+            // Electron apps publish page text only after an assistive client asks; ask once, then reread this selection.
+            if result == .none || result == .unavailable, ElectronAccessibility.enableIfNeeded(pid:app.pid) {
+                if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=electron_accessibility_enabled");fflush(stdout) }
+                try? await Task.sleep(nanoseconds:450_000_000)
+                guard current() else { return }
+                result=await extract()
+                guard current() else { return }
+            }
+            let diagnostics=CommandLine.arguments.contains("--diagnostics")
+            if diagnostics, CommandLine.arguments.contains("--force-copy-fallback") { result = .none } // live test of the fallback path
+            if diagnostics, result.diagnosticKind != "text" {
+                print("TranslateGPT phase=extraction_without_text kind=\(result.diagnosticKind)");fflush(stdout)
+            }
+            // Last resort for apps that expose no readable selection: copy it, then restore the clipboard.
+            // Also when Accessibility reports two different selections: the app's own copy names the current one.
+            if result == .none || result == .unavailable || result == .ambiguous, self.settings.copyFallback {
+                let access=AXSelectionAccess(pid:app.pid)
+                let top=access.frame(window).map { from.y-$0.minY < 30 } ?? true
+                if CopyFallbackPolicy.allowed(bundleID:NSRunningApplication(processIdentifier:app.pid)?.bundleIdentifier,
+                                              startRole:access.role(at:from),secureInput:CopyFallbackPolicy.secureInputActive(),nearTitleBar:top) {
+                    let copy=await CopyFallback.copySelection()
+                    if diagnostics { print("TranslateGPT phase=copy_fallback outcome=\(copy.outcome) restored=\(copy.restored)");fflush(stdout) }
+                    guard current() else { return }
+                    if let text=copy.text { result = .text(text) }
+                } else if diagnostics { print("TranslateGPT phase=copy_fallback outcome=skipped");fflush(stdout) }
+            }
             if case .text(let text)=result {
                 if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=extracted uptime=\(ProcessInfo.processInfo.systemUptime)");fflush(stdout) }
                 self.accept(text,near:point)
@@ -418,9 +641,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func accept(_ text: String, near point: NSPoint) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard SelectionPolicy.accepts(trimmed) else { return }
+        if let reason=SelectionPolicy.rejection(trimmed) {
+            if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=selection_skipped reason=\(reason)");fflush(stdout) }
+            return
+        }
         model.translate(trimmed)
         display(near: point)
+    }
+
+    // Translations go to the web view (its measured height sizes the panel); status text is measured here.
+    private func present(_ text: String, typeset: Bool) {
+        if typeset {
+            let plain=TranslationFormatting.plain(text)
+            growPanel(width: Self.preferredWidth(plain), height: 0)
+            let start=StageProfiler.now
+            let html=TranslationHTML.render(text)
+            StageProfiler.finish("markdown_to_html", start)
+            web.show(html)
+        } else {
+            if text.isEmpty { web.show("") }
+            fitPanel(to: text)
+        }
+    }
+
+    private static func preferredWidth(_ plain: String) -> CGFloat { plain.count > 450 || (plain.contains("\n") && plain.count > 220) ? 560 : 430 }
+
+    private func fitPanel(to text: String) {
+        guard !text.isEmpty else { return }
+        let width=Self.preferredWidth(text)
+        let measured=NSAttributedString(string:text,attributes:[.font:NSFont.systemFont(ofSize:15)])
+            .boundingRect(with:NSSize(width:width-36,height:.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin,.usesFontLeading]).height
+        growPanel(width: width, height: ceil(measured*1.12)+120)
+    }
+
+    // Grows the panel (never shrinks it mid-reply) so longer translations fit, up to 70% of the screen; beyond that it scrolls.
+    private func growPanel(width: CGFloat, height requested: CGFloat) {
+        guard let panel, panel.isVisible, let area=(panel.screen ?? NSScreen.main)?.visibleFrame else { return }
+        let height=min(max(250,ceil(requested)),area.height*0.7)
+        var frame=panel.frame
+        let targetW=max(frame.width,width), targetH=max(frame.height,height)
+        guard targetW>frame.width || targetH>frame.height else { return }
+        let top=frame.maxY
+        frame.size=NSSize(width:targetW,height:targetH)
+        frame.origin.y=max(top-targetH,area.minY+8)
+        frame.origin.x=max(area.minX+8,min(frame.origin.x,area.maxX-targetW-8))
+        panel.setFrame(frame,display:true)
     }
 
     private func display(near point: NSPoint) {
@@ -431,9 +696,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let w: CGFloat = 430, h: CGFloat = 250
         let x = min(max(point.x + 12, area.minX + 8), area.maxX - w - 8)
         let y = (point.y - h - 14 > area.minY) ? point.y - h - 14 : point.y + 20
-        panel.setFrameOrigin(NSPoint(x: x, y: min(max(y, area.minY + 8), area.maxY - h - 8)))
+        // Each new translation starts at the base size; growPanel enlarges it to the reply.
+        panel.setFrame(NSRect(x: x, y: min(max(y, area.minY + 8), area.maxY - h - 8), width: w, height: h), display: true)
         panel.orderFrontRegardless()
+        if TranslationPopup.typeset(model) { present(model.output, typeset: true); web.remeasure() } else { fitPanel(to: model.output) }
         if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=popup uptime=\(ProcessInfo.processInfo.systemUptime)"); fflush(stdout) }
+    }
+
+    @objc private func toggleCopyFallback(_ item: NSMenuItem) {
+        settings.copyFallback.toggle(); item.state=settings.copyFallback ? .on:.off
     }
 
     @objc private func toggleActive(_ item: NSMenuItem) {
@@ -526,15 +797,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        regionSelector.cancel();hotKey.stop();extractionTask?.cancel();ocrTask?.cancel()
+        regionSelector.cancel();hotKey.stop();extractionTask?.cancel();ocrTask?.cancel();trustTimer?.invalidate()
         for monitor in monitors { NSEvent.removeMonitor(monitor) }
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
+    }
+
+    // Diagnostics only (--render-check): typesets a synthetic translation offscreen, prints timings and quits.
+    // No translation request, no panel, no Dock icon.
+    private func runRenderCheck() {
+        let sample="设 $r_i = \\frac{\\tilde{z}_i - q_\\ell^{low}}{q_\\ell^{high} - q_\\ell^{low} + \\epsilon}$，其中 $r_i \\in [0,1]$。\n\n$$\\mathcal{L} = \\sum_{i=1}^{N} \\lVert x_i - \\hat{x}_i \\rVert_2^2$$\n\n- 第一项 **重点**\n- 第二项 `code`\n\n价格 $5 和 $10 不是公式。"
+        func ms(_ start: Double) -> String { String(format: "%.2f", (StageProfiler.now - start) * 1000) }
+        var started=StageProfiler.now
+        let temml=MathRenderer.shared.available
+        let loadMs=ms(started)
+        started=StageProfiler.now
+        let html=TranslationHTML.render(sample)
+        let firstMs=ms(started)
+        started=StageProfiler.now
+        _=TranslationHTML.render(sample)
+        let cachedMs=ms(started)
+        started=StageProfiler.now
+        let characters=Array(sample)
+        for k in 1...20 { _=TranslationHTML.render(String(characters.prefix(characters.count*k/20))) }
+        let streamMs=ms(started)
+        let mathML=html.components(separatedBy:"<math").count-1, fallback=html.components(separatedBy:"class=\"tex").count-1
+        let money=html.contains("价格 $5 和 $10 不是公式")
+        let probe=TranslationWebView(); renderProbe=probe
+        var updates=0, firstUpdate="", height=0
+        started=StageProfiler.now
+        probe.onHeight={ measured in
+            updates+=1
+            if updates==1 {
+                firstUpdate=ms(started); height=Int(measured)
+                started=StageProfiler.now; probe.show(html+"<p>2</p>")
+                return
+            }
+            let ok=temml && mathML==3 && fallback==0 && money && height>40
+            print("TranslateGPT phase=render_check_complete ok=\(ok) temml=\(temml) mathml_formulas=\(mathML) fallback_formulas=\(fallback) money_kept=\(money) temml_load_ms=\(loadMs) convert_first_ms=\(firstMs) convert_cached_ms=\(cachedMs) convert_20_streaming_updates_ms=\(streamMs) webview_start_and_first_update_ms=\(firstUpdate) webview_update_ms=\(ms(started)) content_height=\(height)")
+            fflush(stdout); exit(ok ? 0:3)
+        }
+        probe.show(html)
+        DispatchQueue.main.asyncAfter(deadline:.now()+20) { print("TranslateGPT phase=render_check_timeout"); fflush(stdout); exit(2) }
     }
 
     @objc private func showPreview() {
         model.invalidate()
         model.source = "Vision-language models adapt to new tasks."
-        model.output = "视觉语言模型能够适应新任务。"
+        model.output = "视觉语言模型能够适应新任务。归一化排名为\n\n$$r_i = \\frac{\\tilde{z}_i - q_\\ell^{low}}{q_\\ell^{high} - q_\\ell^{low} + \\epsilon}$$\n\n其中 $r_i \\in [0,1]$，**仅为本地示例**。"
         model.isLoading = false
         model.hasTranslation = true
         display(near: NSEvent.mouseLocation)

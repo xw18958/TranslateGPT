@@ -64,3 +64,51 @@ f=fixture();const clean=f.run({action:'inspect',owner:'proof',claim:'1'});assert
 for(const path of ['/c/00000000-0000-4000-8000-000000000001','/g/renamed-project/c/00000000-0000-4000-8000-000000000001/'])assert.equal(fixture('https://chatgpt.com'+path).run({action:'inspect'}).state,'ready');
 assert.equal(fixture('https://chatgpt.com/c/wrong?target=/c/00000000-0000-4000-8000-000000000001').run({action:'inspect'}).state,'wrong_page');assert.equal(fixture('https://chatgpt.com.evil.invalid/c/00000000-0000-4000-8000-000000000001').run({action:'inspect'}).state,'wrong_page');
 console.log('PASS recovery regressions: persistent ownership after real-context reload, changed-document zero-send guard, wrong-owner rejection, same-document unsent proof, lost-document no-replay, canonical route aliases and spoof isolation.');
+
+// No-response settlement: a submitted job that never answers must not block later explicit requests, and is never resent.
+const idleStart=id=>{const g=fixture();assert.equal(g.run({action:'start',owner:'idle',claim:'1',id,prompt:'Request ID: '+id}).state,'sent');assert.equal(g.button.clicks,1);return g;};
+f=idleStart('no-answer');f.field.value='';f.messages.push(msg('user','Request ID: no-answer'));f.notify();
+f.advance(19999);assert.equal(f.run({action:'status',owner:'idle',id:'no-answer'}).state,'sent');assert.equal(f.run({action:'stop_owned',owner:'idle',id:'no-answer'}).state,'sent');
+f.advance(2);let settled=f.run({action:'status',owner:'idle',id:'no-answer'});assert.equal(settled.state,'failed');assert.equal(settled.failure,'no_response');assert.equal(settled.safeUnsent,false);
+assert.equal(f.run({action:'recover_status',owner:'idle',id:'no-answer'}).state,'failed');assert.equal(f.button.clicks,1);
+assert.equal(f.run({action:'start',owner:'idle',id:'after-no-answer',prompt:'Request ID: after-no-answer'}).state,'sent');assert.equal(f.button.clicks,2);
+f=idleStart('slow-start');f.field.value='';f.messages.push(msg('user','Request ID: slow-start'));f.stops.push({getClientRects:()=>[1]});f.notify();
+f.advance(30000);assert.equal(f.run({action:'status',owner:'idle',id:'slow-start'}).state,'sent');
+f.stops.length=0;f.advance(19999);assert.equal(f.run({action:'status',owner:'idle',id:'slow-start'}).state,'sent');f.advance(2);assert.equal(f.run({action:'status',owner:'idle',id:'slow-start'}).failure,'no_response');
+f=idleStart('ignored-send');f.advance(20001);settled=f.run({action:'status',owner:'idle',id:'ignored-send'});assert.equal(settled.failure,'send_not_accepted');assert.equal(f.field.value,'');assert.equal(f.button.clicks,1);
+f=idleStart('user-edited');f.field.value='user typing';f.advance(20001);settled=f.run({action:'status',owner:'idle',id:'user-edited'});assert.equal(settled.failure,'no_response');assert.equal(f.field.value,'user typing');
+f=idleStart('answered');f.field.value='';f.messages.push(msg('user','Request ID: answered'),msg('assistant','译文'));f.notify();f.advance(60000);assert.equal(f.run({action:'status',owner:'idle',id:'answered'}).state,'responding');
+f=idleStart('unpolled');f.field.value='';f.messages.push(msg('user','Request ID: unpolled'));f.notify();
+assert.equal(f.run({action:'start',owner:'idle',id:'too-early',prompt:'Request ID: too-early'}).state,'occupied');assert.equal(f.button.clicks,1);
+f.advance(20001);assert.equal(f.run({action:'start',owner:'idle',id:'later',prompt:'Request ID: later'}).state,'sent');assert.equal(f.button.clicks,2);
+console.log('PASS no-response settlement: unanswered submitted job fails after 20 s without Stop, visible generation extends it, only our exact unaccepted draft is removed, answered jobs unaffected, next explicit Start allowed; no automatic resend.');
+
+// Layout: the rendered reply is rebuilt as Markdown instead of flattened text.
+const node=(tag,kids=[],attrs={})=>{
+ const e={nodeType:1,tagName:tag,hidden:!!attrs.hidden,childNodes:kids.map(k=>typeof k==='string'?{nodeType:3,nodeValue:k}:k),
+  getAttribute:n=>attrs[n]===undefined?null:attrs[n],classList:{contains:c=>(attrs.class||'').split(' ').includes(c)}};
+ e.children=e.childNodes.filter(k=>k.nodeType===1);
+ Object.defineProperty(e,'textContent',{get:()=>e.childNodes.map(k=>k.nodeType===3?k.nodeValue:k.textContent).join('')});
+ Object.defineProperty(e,'innerText',{get:()=>e.textContent});
+ e.querySelector=s=>{const want=s.toUpperCase(),find=x=>{for(const k of x.children){if(k.tagName===want)return k;const hit=find(k);if(hit)return hit;}return null;};return find(e);};
+ return e;
+};
+f=fixture();f.run({action:'start',owner:'layout',claim:'1',id:'layout',prompt:'Request ID: layout'});
+const math=node('SPAN',[node('SPAN',[node('MATH',['x2']),node('ANNOTATION',['x^2'])],{class:'katex-mathml'}),node('SPAN',['x2'],{class:'katex-html','aria-hidden':'true'})],{class:'katex'});
+const reply=node('DIV',[node('H4',['ChatGPT said:'],{class:'sr-only'}),node('DIV',[
+ node('P',['第一段 ',node('STRONG',['重点']),'，见 ',node('CODE',['main.swift']),'，公式 ',math,'。']),
+ node('UL',[node('LI',['项目一']),node('LI',[node('P',['项目二']),node('OL',[node('LI',['子项'])])])]),
+ node('PRE',[node('DIV',['python',node('BUTTON',['Copy code'])]),node('CODE',['print(1)\n'],{class:'language-python'})]),
+ node('H3',['小结']),node('P',['结束',node('SPAN',['隐藏'],{'aria-hidden':'true'})]),node('DIV',[node('BUTTON',['Copy'])])])],{'data-message-author-role':'assistant'});
+f.messages.push(msg('user','Request ID: layout'),reply);f.notify();
+const layout='第一段 **重点**，见 `main.swift`，公式 $x^2$。\n\n- 项目一\n- 项目二\n  1. 子项\n\n```python\nprint(1)\n```\n\n### 小结\n\n结束';
+assert.equal(f.run({action:'status',owner:'layout',id:'layout'}).text,layout);
+assert.equal(f.run({action:'complete',owner:'layout',id:'layout',expected:layout}).state,'completed');
+f=fixture();f.run({action:'start',owner:'display',claim:'1',id:'display',prompt:'Request ID: display'});
+const katex=tex=>node('SPAN',[node('SPAN',[node('MATH',['m']),node('ANNOTATION',[tex])],{class:'katex-mathml'}),node('SPAN',['m'],{class:'katex-html','aria-hidden':'true'})],{class:'katex'});
+const displayed=node('DIV',[node('DIV',[node('P',['其中 ',katex('r_i'),'：']),node('P',[node('SPAN',[katex('\\frac{a}{b}')],{class:'katex-display'})])])],{'data-message-author-role':'assistant'});
+f.messages.push(msg('user','Request ID: display'),displayed);f.notify();
+assert.equal(f.run({action:'status',owner:'display',id:'display'}).text,'其中 $r_i$：\n\n$$\\frac{a}{b}$$');
+f=fixture();f.run({action:'start',id:'flat',prompt:'Request ID: flat'});f.messages.push(msg('user','Request ID: flat'),msg('assistant','纯文本回复'));f.notify();
+assert.equal(f.run({action:'status',id:'flat'}).text,'纯文本回复');
+console.log('PASS layout: reply rebuilt as Markdown (paragraphs, bold, inline code, inline and displayed math, nested lists, fenced code, headings); controls, hidden and screen-reader text skipped; plain-text fallback.');

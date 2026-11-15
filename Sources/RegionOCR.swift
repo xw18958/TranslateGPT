@@ -7,7 +7,7 @@ enum OCRFailure: LocalizedError {
     case permission, unsupported, empty, secure, unavailable, recognition
     var errorDescription: String? {
         switch self {
-        case .permission: return "Screen Recording permission is required for region OCR. Enable TranslateGPT in System Settings → Privacy & Security → Screen & System Audio Recording, then reopen the app. Normal selection translation remains available."
+        case .permission: return "Screen Recording permission is required for region OCR. In System Settings → Privacy & Security → Screen & System Audio Recording, turn on TranslateGPT. If it is already on, select it, click –, add it again with +, then reopen TranslateGPT. Normal selection translation remains available."
         case .unsupported: return "Region OCR requires macOS 15.2 or later. Normal selection translation remains available."
         case .empty: return "No translatable English was recognized. Select a region with clear text."
         case .secure: return "Secure input fields cannot be translated."
