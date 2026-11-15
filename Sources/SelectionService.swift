@@ -24,9 +24,15 @@ final class SelectionSettings {
         set { defaults.set(newValue, forKey: enabledKey) }
     }
     var exclusions: [String:String] { defaults.dictionary(forKey: exclusionsKey) as? [String:String] ?? [:] }
+    // Asked at most once per installed build: an update can change the app's code identity,
+    // after which macOS needs a fresh request before it lists the new build.
+    static var currentBuild: String {
+        let info=Bundle.main.infoDictionary ?? [:]
+        return "\(info["CFBundleShortVersionString"] as? String ?? "")/\(info["CFBundleVersion"] as? String ?? "")"
+    }
     var screenPermissionRequested: Bool {
-        get { defaults.bool(forKey:"TranslateGPT.ocrPermissionRequested") }
-        set { defaults.set(newValue,forKey:"TranslateGPT.ocrPermissionRequested") }
+        get { defaults.string(forKey:"TranslateGPT.ocrPermissionRequestedBuild") == Self.currentBuild }
+        set { if newValue { defaults.set(Self.currentBuild,forKey:"TranslateGPT.ocrPermissionRequestedBuild") } else { defaults.removeObject(forKey:"TranslateGPT.ocrPermissionRequestedBuild") } }
     }
     func exclude(_ app: SourceApplication) { var items=exclusions; items[app.key]=app.name; defaults.set(items, forKey:exclusionsKey) }
     func include(_ key: String) { var items=exclusions; items.removeValue(forKey:key); defaults.set(items, forKey:exclusionsKey) }

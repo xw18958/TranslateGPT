@@ -2,7 +2,7 @@
 
 A native macOS English-to-Simplified-Chinese translator. Select text in another app to see a floating, Chinese-only translation panel. For text in images, scanned PDFs or inaccessible app views, explicitly select a screen region for local OCR.
 
-This repository contains the 0.2.4 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
+This repository contains the 0.2.5 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
 
 ## Features
 
@@ -39,7 +39,7 @@ Edit `config/Engine.local.json` and replace the synthetic example URL with your 
 ./build.sh
 ```
 
-The result is `build/TranslateGPT.app`. The build creates the app bundle from tracked source and `Resources/Info.plist`; it never copies or modifies an installed app. By default it uses local ad-hoc signing. Set `TRANSLATEGPT_SIGN_IDENTITY` if you have a signing identity.
+The result is `build/TranslateGPT.app`. The build creates the app bundle from tracked source and `Resources/Info.plist`; it never copies or modifies an installed app. By default it uses local ad-hoc signing. Set `TRANSLATEGPT_SIGN_IDENTITY` if you have a signing identity. An ad-hoc signature changes with every build, so macOS stops honouring the existing Accessibility and Screen Recording permissions after each update; signing every build with the same identity (for example a self-signed code-signing certificate in your login keychain) keeps them.
 
 To select another configuration file, set `TRANSLATEGPT_CONFIG`. To verify a build using only the synthetic example:
 
@@ -57,7 +57,7 @@ Copy the built app to your preferred Applications directory, then open it. This 
 - Allow TranslateGPT to control **Safari** when macOS asks, and enable Safari's **Allow JavaScript from Apple Events** setting.
 - **Screen Recording** is requested only when you invoke region OCR. Denial leaves ordinary selection translation available.
 
-Locally signed rebuilds can require macOS to refresh an existing permission. This repository's build and test scripts do not change permissions or install the app.
+After a rebuild with a different signature, a permission switch can stay on in System Settings without applying to the new build: remove TranslateGPT from that list with –, add it again with +, then reopen the app. The controls window warns when Accessibility is not in effect. This repository's build and test scripts do not change permissions or install the app.
 
 ## Use
 

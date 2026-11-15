@@ -31,6 +31,7 @@ final class TranslateModel: ObservableObject {
     @Published var active = false
     @Published var hasTranslation = false
     @Published var isLoading = false
+    @Published var accessibilityTrusted = true
     private var requestID = UUID()
     private var task: Task<Void, Never>?
     private var cache: [String: String] = [:]
@@ -171,6 +172,7 @@ struct TranslationControls: View {
     @ObservedObject var model: TranslateModel
     let toggle: () -> Void
     let quit: () -> Void
+    let openAccessibility: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -189,6 +191,15 @@ struct TranslationControls: View {
                 .foregroundStyle(model.active ? Color.green : Color.secondary)
             Text("Select English text in another app to translate it. For images or inaccessible text, use Control–Option–Command–T.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if !model.accessibilityTrusted {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Accessibility permission is not in effect, so selected text cannot be read.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout.weight(.semibold)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    Text("Turn on TranslateGPT in System Settings → Privacy & Security → Accessibility. If it is already on, select it, click –, add it again with +, then reopen TranslateGPT.")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button("Open Accessibility Settings", action: openAccessibility)
+                }
+            }
             HStack {
                 Button(model.active ? "Turn Off" : "Turn On", action: toggle)
                     .buttonStyle(.borderedProminent).controlSize(.large)
@@ -224,6 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let hotKey=OCRHotKey()
     private var hotKeyAvailable=false
     private var activationObserver: NSObjectProtocol?
+    private var trustTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -295,9 +307,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controlWindow.isReleasedWhenClosed=false
         let controls=NSHostingView(rootView:TranslationControls(model:model,
             toggle:{ [weak self] in self?.setAutomaticTranslation(!(self?.settings.enabled ?? false)) },
-            quit:{ [weak self] in self?.quitApp() }))
+            quit:{ [weak self] in self?.quitApp() },
+            openAccessibility:{ [weak self] in self?.openPermissions() }))
+        model.accessibilityTrusted=AXIsProcessTrusted()
         controlWindow.contentView=controls
         controlWindow.setContentSize(controls.fittingSize)
+        // Permission can be granted or lose effect while running; the check is a cheap local call.
+        trustTimer=Timer.scheduledTimer(withTimeInterval:2,repeats:true) { [weak self] _ in
+            MainActor.assumeIsolated { guard let self else { return }; self.refreshAccessibilityTrust() }
+        }
         controlWindow.center()
         showControls()
 
@@ -372,6 +390,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT accessibilityTrusted=\(AXIsProcessTrusted())"); fflush(stdout) }
         if !AXIsProcessTrusted() { askForAccessibility() }
+    }
+
+    private func refreshAccessibilityTrust() {
+        let trusted=AXIsProcessTrusted()
+        guard trusted != model.accessibilityTrusted else { return }
+        model.accessibilityTrusted=trusted
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let content=self.controlWindow?.contentView else { return }
+            self.controlWindow.setContentSize(content.fittingSize)
+        }
     }
 
     private func askForAccessibility() {
@@ -526,7 +554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        regionSelector.cancel();hotKey.stop();extractionTask?.cancel();ocrTask?.cancel()
+        regionSelector.cancel();hotKey.stop();extractionTask?.cancel();ocrTask?.cancel();trustTimer?.invalidate()
         for monitor in monitors { NSEvent.removeMonitor(monitor) }
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
     }

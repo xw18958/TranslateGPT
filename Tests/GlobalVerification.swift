@@ -36,6 +36,8 @@ struct FakeSelectionAccess: SelectionAccess {
         precondition(!SelectionSettings(defaults:defaults).permits(unknown) && !settings.permits(unknown,manual:true))
         settings.include(unknown.key);precondition(settings.permits(unknown))
         settings.screenPermissionRequested=true;precondition(SelectionSettings(defaults:defaults).screenPermissionRequested)
+        defaults.set("0.0.0/0",forKey:"TranslateGPT.ocrPermissionRequestedBuild");precondition(!settings.screenPermissionRequested)
+        defaults.set(true,forKey:"TranslateGPT.ocrPermissionRequested");precondition(!settings.screenPermissionRequested)
         precondition(!settings.permits(.init(pid:getpid(),key:"own",name:"Own")))
         precondition(!settings.permits(.init(pid:98765,key:"com.xw.quickselecttranslate",name:"Own")))
         print("PASS settings: global default, restart persistence, exclusions, manual OCR, unbundled process and own-app rejection")
