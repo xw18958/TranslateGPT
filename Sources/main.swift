@@ -115,16 +115,40 @@ enum MathText {
         "min":"min","max":"max","log":"log","exp":"exp","arg":"arg","sqrt":"√","quad":" ","qquad":"  ","left":"","right":"",",":" ",";":" "]
     static let sub:[Character:Character]=["0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉","i":"ᵢ","j":"ⱼ","k":"ₖ","n":"ₙ","t":"ₜ","+":"₊","-":"₋","a":"ₐ","e":"ₑ","o":"ₒ","x":"ₓ","m":"ₘ","l":"ₗ","s":"ₛ","p":"ₚ","r":"ᵣ","u":"ᵤ","v":"ᵥ","h":"ₕ"]
     static let sup:[Character:Character]=["0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","n":"ⁿ","i":"ⁱ","T":"ᵀ","t":"ᵗ","k":"ᵏ"]
-    static func readable(_ tex: String) -> String {
+    // Symbols, fractions and accents become Unicode; _ and ^ stay as markers for attributed().
+    static func normalized(_ tex: String) -> String {
         var s=tex
-        for _ in 0..<3 { s=s.replacingOccurrences(of:#"\\(?:frac|dfrac|tfrac)\{([^{}]*)\}\{([^{}]*)\}"#,with:"($1)/($2)",options:.regularExpression) }
-        s=s.replacingOccurrences(of:#"\\(?:mathrm|text|mathbf|mathit|operatorname|boldsymbol|mathcal|hat|bar|tilde)\{([^{}]*)\}"#,with:"$1",options:.regularExpression)
-        s=s.replacingOccurrences(of:#"\\([A-Za-z]+|[,;])"#,with:"\u{1}$1\u{2}",options:.regularExpression)
+        for (name,mark) in [("tilde","\u{303}"),("widetilde","\u{303}"),("hat","\u{302}"),("widehat","\u{302}"),("bar","\u{304}"),("overline","\u{305}"),("dot","\u{307}"),("vec","\u{20D7}")] {
+            s=s.replacingOccurrences(of:"\\\\"+name+#"\{(\\?[A-Za-z]+)\}"#,with:"$1"+mark,options:.regularExpression)
+            s=s.replacingOccurrences(of:"\\\\"+name+#" ?([A-Za-z])"#,with:"$1"+mark,options:.regularExpression)
+        }
+        s=s.replacingOccurrences(of:#"\\(?:mathrm|text|mathbf|mathit|operatorname|boldsymbol|mathcal|mathbb)\{([^{}]*)\}"#,with:"$1",options:.regularExpression)
+        for _ in 0..<3 { s=s.replacingOccurrences(of:#"\\(?:frac|dfrac|tfrac)\{((?:[^{}]|\{[^{}]*\})*)\}\{((?:[^{}]|\{[^{}]*\})*)\}"#,with:"($1)/($2)",options:.regularExpression) }
+        s=s.replacingOccurrences(of:#"\\([A-Za-z]+|[,;!])"#,with:"\u{1}$1\u{2}",options:.regularExpression)
         for (name,value) in symbols { s=s.replacingOccurrences(of:"\u{1}"+name+"\u{2}",with:value) }
+        s=s.replacingOccurrences(of:"\u{1}ell\u{2}",with:"ℓ").replacingOccurrences(of:"\u{1}!\u{2}",with:"")
         s=s.replacingOccurrences(of:#"\x{1}([A-Za-z]+)\x{2}"#,with:"$1",options:.regularExpression)
-        s=script(s,"_",sub); s=script(s,"^",sup)
-        s=s.replacingOccurrences(of:"{",with:"").replacingOccurrences(of:"}",with:"").replacingOccurrences(of:"-",with:"−")
-        return s.replacingOccurrences(of:#"\(([A-Za-z0-9α-ω]+)\)/\(([A-Za-z0-9α-ω]+)\)"#,with:"$1/$2",options:.regularExpression)
+        s=s.replacingOccurrences(of:#"(?<![_^])\(([A-Za-z0-9α-ωℓ]+)\)/\(([A-Za-z0-9α-ωℓ]+)\)"#,with:"$1/$2",options:.regularExpression)
+        return s.replacingOccurrences(of:"-",with:"−")
+    }
+    static func readable(_ tex: String) -> String { String(attributed(tex).characters) }
+    // Real subscripts and superscripts (any letters, e.g. q with "low" below and "high" above) via smaller, shifted text.
+    static func attributed(_ tex: String) -> AttributedString {
+        let s=Array(normalized(tex)); var out=AttributedString(), plain="", i=0
+        func flush() { if !plain.isEmpty { out.append(AttributedString(plain.replacingOccurrences(of:"{",with:"").replacingOccurrences(of:"}",with:""))); plain="" } }
+        while i<s.count {
+            let c=s[i]
+            guard (c=="_" || c=="^"), i+1<s.count else { plain.append(c); i+=1; continue }
+            var body="", j=i+1
+            if s[j]=="{" { var depth=0; while j<s.count { if s[j]=="{" { depth+=1; if depth==1 { j+=1; continue } } else if s[j]=="}" { depth-=1; if depth==0 { j+=1; break } }; body.append(s[j]); j+=1 } }
+            else { body=String(s[j]); j+=1 }
+            flush()
+            var piece=AttributedString(body.replacingOccurrences(of:"{",with:"").replacingOccurrences(of:"}",with:"").replacingOccurrences(of:"_",with:"").replacingOccurrences(of:"^",with:""))
+            piece[AttributeScopes.SwiftUIAttributes.FontAttribute.self]=Font.system(size:10)
+            piece[AttributeScopes.SwiftUIAttributes.BaselineOffsetAttribute.self]=c=="_" ? -4:6
+            out.append(piece); i=j
+        }
+        flush(); return out
     }
     // x_{ab} → x with Unicode subscripts when every character has one, else x_ab.
     static func script(_ s:String,_ mark:Character,_ table:[Character:Character]) -> String {
@@ -181,7 +205,7 @@ enum TranslationFormatting {
             if text[i]=="$" {
                 let double=text[i...].hasPrefix("$$"), start=text.index(i,offsetBy:double ? 2:1)
                 if start<=text.endIndex, let close=text[start...].range(of:double ? "$$":"$"), close.lowerBound>start {
-                    flush(); var math=AttributedString(MathText.readable(String(text[start..<close.lowerBound]))); math.inlinePresentationIntent = .emphasized
+                    flush(); let math=MathText.attributed(String(text[start..<close.lowerBound]))
                     out.append(math); i=close.upperBound; continue
                 }
             }
