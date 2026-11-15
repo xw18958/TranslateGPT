@@ -59,7 +59,35 @@ enum SelectionPolicy {
     }
 }
 
-enum SelectedContent: Equatable { case text(String), none, secure, ambiguous, unavailable }
+enum SelectedContent: Equatable {
+    case text(String), none, secure, ambiguous, unavailable
+    // Source-free label for diagnostics.
+    var diagnosticKind: String {
+        switch self { case .text: return "text"; case .none: return "none"; case .secure: return "secure"; case .ambiguous: return "ambiguous"; case .unavailable: return "unavailable" }
+    }
+}
+
+// Electron apps expose web content to Accessibility only after an assistive client sets AXManualAccessibility.
+// Turned on at most once per process, only after a selection there could not be read. Code editors are excluded
+// because they switch to screen-reader mode when accessibility support turns on.
+enum ElectronAccessibilityPolicy {
+    static let excludedBundles:Set<String>=["com.microsoft.VSCode","com.microsoft.VSCodeInsiders","com.visualstudio.code.oss",
+        "com.vscodium","com.todesktop.230313mzl4w4u92","com.exafunction.windsurf","cc.arduino.IDE2"]
+    static func eligible(bundleID: String?, bundleURL: URL?) -> Bool {
+        guard let bundleURL, !excludedBundles.contains(bundleID ?? "") else { return false }
+        return FileManager.default.fileExists(atPath:bundleURL.appendingPathComponent("Contents/Frameworks/Electron Framework.framework").path)
+    }
+}
+@MainActor enum ElectronAccessibility {
+    private static var requested=Set<pid_t>()
+    /// True only when this call turned accessibility on, so the caller may read the selection once more.
+    static func enableIfNeeded(pid: pid_t) -> Bool {
+        guard !requested.contains(pid), let app=NSRunningApplication(processIdentifier:pid),
+              ElectronAccessibilityPolicy.eligible(bundleID:app.bundleIdentifier,bundleURL:app.bundleURL) else { return false }
+        requested.insert(pid)
+        return AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid),"AXManualAccessibility" as CFString,kCFBooleanTrue) == .success
+    }
+}
 
 // Small adapter makes traversal testable without touching other applications.
 protocol SelectionAccess {

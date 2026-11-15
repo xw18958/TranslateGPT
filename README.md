@@ -2,7 +2,7 @@
 
 A native macOS English-to-Simplified-Chinese translator. Select text in another app to see a floating, Chinese-only translation panel. For text in images, scanned PDFs or inaccessible app views, explicitly select a screen region for local OCR.
 
-This repository contains the 0.2.5 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
+This repository contains the 0.2.6 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
 
 ## Features
 
@@ -74,7 +74,7 @@ Safari must be running and signed in. The app creates and reuses its own minimiz
 - OCR runs on-device, only after explicit region selection. It is not prewarmed.
 - The app does not automatically copy selections, read whole source documents, or extract browser authentication data.
 - Translation history can remain in your ChatGPT conversation. The app's separate cache is memory-only.
-- Native selection support depends on what the source app exposes. Secure fields and protected content can be unavailable.
+- Native selection support depends on what the source app exposes. In Electron apps (for example the Claude desktop app), the first selection that cannot be read makes TranslateGPT ask that app to expose its text to Accessibility, then read the selection again; code editors such as VS Code and Cursor are excluded because they switch to screen-reader mode. Secure fields and protected content can be unavailable.
 - Safari automation depends on the website's UI and may need maintenance when that UI changes.
 
 ## Tests

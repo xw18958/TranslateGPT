@@ -41,6 +41,16 @@ struct FakeSelectionAccess: SelectionAccess {
         precondition(!settings.permits(.init(pid:getpid(),key:"own",name:"Own")))
         precondition(!settings.permits(.init(pid:98765,key:"com.xw.quickselecttranslate",name:"Own")))
         print("PASS settings: global default, restart persistence, exclusions, manual OCR, unbundled process and own-app rejection")
+        let fakeApps=FileManager.default.temporaryDirectory.appendingPathComponent("TranslateGPT-electron-"+UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:fakeApps) }
+        let electron=fakeApps.appendingPathComponent("Chat.app"), native=fakeApps.appendingPathComponent("Notes.app")
+        try? FileManager.default.createDirectory(at:electron.appendingPathComponent("Contents/Frameworks/Electron Framework.framework"),withIntermediateDirectories:true)
+        try? FileManager.default.createDirectory(at:native.appendingPathComponent("Contents/MacOS"),withIntermediateDirectories:true)
+        precondition(ElectronAccessibilityPolicy.eligible(bundleID:"com.example.chat",bundleURL:electron))
+        precondition(!ElectronAccessibilityPolicy.eligible(bundleID:"com.microsoft.VSCode",bundleURL:electron))
+        precondition(!ElectronAccessibilityPolicy.eligible(bundleID:"com.example.notes",bundleURL:native) && !ElectronAccessibilityPolicy.eligible(bundleID:nil,bundleURL:nil))
+        precondition(SelectedContent.none.diagnosticKind=="none" && SelectedContent.text("x").diagnosticKind=="text")
+        print("PASS Electron selection access: Electron apps eligible once readable text is missing; code editors and native apps excluded")
 
         let start=CGPoint(x:0,y:0),end=CGPoint(x:20,y:0)
         func read(_ access:FakeSelectionAccess) -> SelectedContent { SelectionExtractor(access:access).read(start:start,end:end) }

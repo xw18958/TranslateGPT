@@ -388,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT accessibilityTrusted=\(AXIsProcessTrusted())"); fflush(stdout) }
+        if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT accessibilityTrusted=\(AXIsProcessTrusted()) screenCaptureAllowed=\(CGPreflightScreenCaptureAccess())"); fflush(stdout) }
         if !AXIsProcessTrusted() { askForAccessibility() }
     }
 
@@ -430,13 +430,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               currentExternalApp()?.pid==app.pid, sameWindow(window,app:app), settings.permits(app) else { return }
         let from=ScreenCoordinates.quartz(start), end=ScreenCoordinates.quartz(point)
         extractionTask=Task {
-            let result=await Task.detached(priority:.userInitiated) {
-                StageProfiler.measure("selected_text_extraction") {
-                    SelectionExtractor(access:AXSelectionAccess(pid:app.pid)).read(start:from,end:end)
-                }
-            }.value
-            guard !Task.isCancelled, epoch==self.selectionEpoch,
-                  self.currentExternalApp()?.pid==app.pid,self.sameWindow(window,app:app),self.settings.permits(app) else { return }
+            func extract() async -> SelectedContent {
+                await Task.detached(priority:.userInitiated) {
+                    StageProfiler.measure("selected_text_extraction") {
+                        SelectionExtractor(access:AXSelectionAccess(pid:app.pid)).read(start:from,end:end)
+                    }
+                }.value
+            }
+            @MainActor func current() -> Bool {
+                guard !Task.isCancelled, epoch==self.selectionEpoch else { return false }
+                guard self.currentExternalApp()?.pid==app.pid, self.sameWindow(window,app:app) else { return false }
+                return self.settings.permits(app)
+            }
+            var result=await extract()
+            guard current() else { return }
+            // Electron apps publish page text only after an assistive client asks; ask once, then reread this selection.
+            if result == .none || result == .unavailable, ElectronAccessibility.enableIfNeeded(pid:app.pid) {
+                if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=electron_accessibility_enabled");fflush(stdout) }
+                try? await Task.sleep(nanoseconds:450_000_000)
+                guard current() else { return }
+                result=await extract()
+                guard current() else { return }
+            }
+            if CommandLine.arguments.contains("--diagnostics"), result.diagnosticKind != "text" {
+                print("TranslateGPT phase=extraction_without_text kind=\(result.diagnosticKind)");fflush(stdout)
+            }
             if case .text(let text)=result {
                 if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=extracted uptime=\(ProcessInfo.processInfo.systemUptime)");fflush(stdout) }
                 self.accept(text,near:point)
