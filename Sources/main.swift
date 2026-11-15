@@ -107,6 +107,61 @@ final class TranslateModel: ObservableObject {
     }
 }
 
+// Renders the Markdown subset the page agent produces: paragraphs, lists, headings, quotes, emphasis and code.
+// Inline emphasis is parsed here rather than with CommonMark, whose flanking rules leave `**粗体：**后文` unbolded.
+enum TranslationFormatting {
+    static func attributed(_ markdown: String) -> AttributedString {
+        var out=AttributedString(), inCode=false, first=true
+        for raw in markdown.components(separatedBy:"\n") {
+            if raw.trimmingCharacters(in:.whitespaces).hasPrefix("```") { inCode.toggle(); continue }
+            var line: AttributedString
+            if inCode { line=AttributedString(raw); line.inlinePresentationIntent = .code }
+            else {
+                let (prefix,body,heading)=parts(raw)
+                line=AttributedString(prefix)
+                var rest=inline(body)
+                if heading { rest.inlinePresentationIntent = .stronglyEmphasized }
+                line.append(rest)
+            }
+            if !first { out.append(AttributedString("\n")) }
+            out.append(line); first=false
+        }
+        return out
+    }
+    static func plain(_ markdown: String) -> String { String(attributed(markdown).characters) }
+    // List markers become bullets, heading hashes are removed, quotes get a bar.
+    static func parts(_ line: String) -> (String,String,Bool) {
+        let indent=String(line.prefix { $0==" " }), rest=line.dropFirst(indent.count)
+        if let m=rest.range(of:#"^[-*+] "#,options:.regularExpression) { return (indent+"• ",String(rest[m.upperBound...]),false) }
+        if let m=rest.range(of:#"^\d{1,3}[.)] "#,options:.regularExpression) { return (indent+String(rest[m]),String(rest[m.upperBound...]),false) }
+        if let m=rest.range(of:#"^#{1,6} "#,options:.regularExpression) { return (indent,String(rest[m.upperBound...]),true) }
+        if let m=rest.range(of:#"^> ?"#,options:.regularExpression) { return (indent+"┃ ",String(rest[m.upperBound...]),false) }
+        return (indent,String(rest),false)
+    }
+    static func inline(_ text: String) -> AttributedString {
+        var out=AttributedString(), plain="", i=text.startIndex
+        func flush() { if !plain.isEmpty { out.append(AttributedString(plain)); plain="" } }
+        while i<text.endIndex {
+            let after=text.index(after:i)
+            if text[i]=="`", after<text.endIndex, let close=text[after...].firstIndex(of:"`") {
+                flush(); var code=AttributedString(String(text[after..<close])); code.inlinePresentationIntent = .code
+                out.append(code); i=text.index(after:close); continue
+            }
+            if text[i...].hasPrefix("**"), let close=text[text.index(i,offsetBy:2)...].range(of:"**"), close.lowerBound>text.index(i,offsetBy:2) {
+                flush(); var bold=inline(String(text[text.index(i,offsetBy:2)..<close.lowerBound])); bold.inlinePresentationIntent = .stronglyEmphasized
+                out.append(bold); i=close.upperBound; continue
+            }
+            if text[i]=="*", after<text.endIndex, !text[after].isWhitespace, text[after] != "*",
+               let close=text[after...].firstIndex(of:"*"), close>after, !text[text.index(before:close)].isWhitespace {
+                flush(); var italic=inline(String(text[after..<close])); italic.inlinePresentationIntent = .emphasized
+                out.append(italic); i=text.index(after:close); continue
+            }
+            plain.append(text[i]); i=after
+        }
+        flush(); return out
+    }
+}
+
 struct TranslationPopup: View {
     @ObservedObject var model: TranslateModel
 
@@ -139,8 +194,10 @@ struct TranslationPopup: View {
                         }
                         .foregroundStyle(.secondary)
                     } else {
-                        Text(model.output)
+                        // Translations are formatted; English status and error messages stay plain.
+                        Text(model.hasTranslation || model.isLoading ? TranslationFormatting.attributed(model.output) : AttributedString(model.output))
                             .font(.system(size: 15))
+                            .lineSpacing(2)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         if model.isLoading { ProgressView().controlSize(.small).accessibilityLabel("Receiving translation") }
@@ -155,15 +212,17 @@ struct TranslationPopup: View {
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button("Copy translation") {
+                    // Plain text keeps line breaks and bullets; Markdown-aware apps also get the formatting.
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(model.output, forType: .string)
+                    NSPasteboard.general.setString(TranslationFormatting.plain(model.output), forType: .string)
+                    NSPasteboard.general.setString(model.output, forType: NSPasteboard.PasteboardType("net.daringfireball.markdown"))
                 }
                 .buttonStyle(.borderless)
                 .disabled(!model.hasTranslation)
             }
         }
         .padding(15)
-        .frame(width: 430, height: 250)
+        .frame(minWidth: 300, maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
     }
 }
@@ -236,13 +295,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hotKeyAvailable=false
     private var activationObserver: NSObjectProtocol?
     private var trustTimer: Timer?
+    private var outputObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
         let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 430, height: 250),
-            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
+            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -255,8 +315,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: TranslationPopup(model: model))
+        let popup = NSHostingView(rootView: TranslationPopup(model: model))
+        popup.sizingOptions = [] // the panel size is set by fitPanel or by the user, not by SwiftUI's ideal size
+        window.contentView = popup
+        window.minSize = NSSize(width: 300, height: 200)
         panel = window
+        outputObserver = model.$output.receive(on: DispatchQueue.main).sink { [weak self] text in
+            MainActor.assumeIsolated { guard let self else { return }; self.fitPanel(to: text) }
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "character.book.closed.fill", accessibilityDescription: "TranslateGPT")
@@ -489,6 +555,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         display(near: point)
     }
 
+    // Grows the panel (never shrinks it mid-reply) so longer translations fit, up to 70% of the screen; beyond that it scrolls.
+    private func fitPanel(to text: String) {
+        guard let panel, panel.isVisible, !text.isEmpty, let area=(panel.screen ?? NSScreen.main)?.visibleFrame else { return }
+        let plain=model.hasTranslation || model.isLoading ? TranslationFormatting.plain(text) : text
+        let width: CGFloat = plain.count > 450 || (plain.contains("\n") && plain.count > 220) ? 560 : 430
+        let measured=NSAttributedString(string:plain,attributes:[.font:NSFont.systemFont(ofSize:15)])
+            .boundingRect(with:NSSize(width:width-36,height:.greatestFiniteMagnitude),options:[.usesLineFragmentOrigin,.usesFontLeading]).height
+        let height=min(max(250,ceil(measured*1.12)+120),area.height*0.7)
+        var frame=panel.frame
+        let targetW=max(frame.width,width), targetH=max(frame.height,height)
+        guard targetW>frame.width || targetH>frame.height else { return }
+        let top=frame.maxY
+        frame.size=NSSize(width:targetW,height:targetH)
+        frame.origin.y=max(top-targetH,area.minY+8)
+        frame.origin.x=max(area.minX+8,min(frame.origin.x,area.maxX-targetW-8))
+        panel.setFrame(frame,display:true)
+    }
+
     private func display(near point: NSPoint) {
         let displayStart=StageProfiler.now
         defer {StageProfiler.finish("panel_position_and_orderFront",displayStart)}
@@ -497,8 +581,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let w: CGFloat = 430, h: CGFloat = 250
         let x = min(max(point.x + 12, area.minX + 8), area.maxX - w - 8)
         let y = (point.y - h - 14 > area.minY) ? point.y - h - 14 : point.y + 20
-        panel.setFrameOrigin(NSPoint(x: x, y: min(max(y, area.minY + 8), area.maxY - h - 8)))
+        // Each new translation starts at the base size; fitPanel grows it to the reply.
+        panel.setFrame(NSRect(x: x, y: min(max(y, area.minY + 8), area.maxY - h - 8), width: w, height: h), display: true)
         panel.orderFrontRegardless()
+        fitPanel(to: model.output)
         if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=popup uptime=\(ProcessInfo.processInfo.systemUptime)"); fflush(stdout) }
     }
 

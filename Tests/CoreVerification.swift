@@ -73,6 +73,14 @@ actor FakeProgressTranslator: ProgressiveTranslationBackend {
         precondition(streaming.output=="controlled streaming failure" && !streaming.hasTranslation)
         streaming.message("Recognizing text…",loading:true);streaming.invalidate();precondition(!streaming.isLoading && streaming.output.isEmpty)
         print("PASS streaming: real partial updates before completion, stale partial suppression, failure replacement and recognition cancellation")
+        let layout="第一段 **重点**，见 `main.swift`。\n\n- 项目一\n- 项目二\n  1. 子项\n\n```python\nprint(1)\n```\n\n### 小结\n\n> 引用"
+        precondition(TranslationFormatting.plain(layout)=="第一段 重点，见 main.swift。\n\n• 项目一\n• 项目二\n  1. 子项\n\nprint(1)\n\n小结\n\n┃ 引用")
+        precondition(TranslationFormatting.plain("泛化")=="泛化" && TranslationFormatting.plain("a * b and 2*3")=="a * b and 2*3")
+        let cjkBold=TranslationFormatting.attributed("**我的判断：**我会送审，*并*标注 `LLM`。")
+        precondition(String(cjkBold.characters)=="我的判断：我会送审，并标注 LLM。")
+        precondition(cjkBold.runs.contains { $0.inlinePresentationIntent == .stronglyEmphasized && String(cjkBold[$0.range].characters)=="我的判断：" })
+        precondition(cjkBold.runs.contains { $0.inlinePresentationIntent == .emphasized } && cjkBold.runs.contains { $0.inlinePresentationIntent == .code })
+        print("PASS layout rendering: paragraphs, bullets, numbering, headings, quotes, code blocks, CJK-safe bold, italics and inline code; plain copy keeps line breaks and bullets")
 
         let suite="TranslateGPT-verification-"+UUID().uuidString
         let defaults=UserDefaults(suiteName:suite)!

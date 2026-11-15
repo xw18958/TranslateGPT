@@ -2,7 +2,7 @@
 
 A native macOS English-to-Simplified-Chinese translator. Select text in another app to see a floating, Chinese-only translation panel. For text in images, scanned PDFs or inaccessible app views, explicitly select a screen region for local OCR.
 
-This repository contains the 0.2.8 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
+This repository contains the 0.2.9 source, adapted for a self-contained build and local conversation configuration. It does not include a prebuilt app, personal configuration, runtime state or development backups.
 
 ## Features
 
@@ -12,6 +12,7 @@ This repository contains the 0.2.8 source, adapted for a self-contained build an
 - Explicit region OCR with **Control–Option–Command–T**; Escape cancels.
 - Background use of one configured ChatGPT conversation in Safari, with Instant mode.
 - Progressive output, a bounded in-memory translation cache and cancellation of obsolete requests.
+- Layout-preserving translations: paragraphs, bullet and numbered lists, headings, emphasis and code are kept, rendered in the panel (which grows with longer text and can be resized), and kept by **Copy translation** as line breaks and bullets (plus Markdown for apps that accept it).
 - Owned engine-tab recovery after index shifts and page reloads; fresh owned windows when an engine tab or window is lost.
 - Draft preservation and protection against automatically replaying an uncertain submission.
 

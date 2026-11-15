@@ -82,3 +82,28 @@ f=idleStart('unpolled');f.field.value='';f.messages.push(msg('user','Request ID:
 assert.equal(f.run({action:'start',owner:'idle',id:'too-early',prompt:'Request ID: too-early'}).state,'occupied');assert.equal(f.button.clicks,1);
 f.advance(20001);assert.equal(f.run({action:'start',owner:'idle',id:'later',prompt:'Request ID: later'}).state,'sent');assert.equal(f.button.clicks,2);
 console.log('PASS no-response settlement: unanswered submitted job fails after 20 s without Stop, visible generation extends it, only our exact unaccepted draft is removed, answered jobs unaffected, next explicit Start allowed; no automatic resend.');
+
+// Layout: the rendered reply is rebuilt as Markdown instead of flattened text.
+const node=(tag,kids=[],attrs={})=>{
+ const e={nodeType:1,tagName:tag,hidden:!!attrs.hidden,childNodes:kids.map(k=>typeof k==='string'?{nodeType:3,nodeValue:k}:k),
+  getAttribute:n=>attrs[n]===undefined?null:attrs[n],classList:{contains:c=>(attrs.class||'').split(' ').includes(c)}};
+ e.children=e.childNodes.filter(k=>k.nodeType===1);
+ Object.defineProperty(e,'textContent',{get:()=>e.childNodes.map(k=>k.nodeType===3?k.nodeValue:k.textContent).join('')});
+ Object.defineProperty(e,'innerText',{get:()=>e.textContent});
+ e.querySelector=s=>{const want=s.toUpperCase(),find=x=>{for(const k of x.children){if(k.tagName===want)return k;const hit=find(k);if(hit)return hit;}return null;};return find(e);};
+ return e;
+};
+f=fixture();f.run({action:'start',owner:'layout',claim:'1',id:'layout',prompt:'Request ID: layout'});
+const math=node('SPAN',[node('SPAN',[node('MATH',['x2']),node('ANNOTATION',['x^2'])],{class:'katex-mathml'}),node('SPAN',['x2'],{class:'katex-html','aria-hidden':'true'})],{class:'katex'});
+const reply=node('DIV',[node('H4',['ChatGPT said:'],{class:'sr-only'}),node('DIV',[
+ node('P',['第一段 ',node('STRONG',['重点']),'，见 ',node('CODE',['main.swift']),'，公式 ',math,'。']),
+ node('UL',[node('LI',['项目一']),node('LI',[node('P',['项目二']),node('OL',[node('LI',['子项'])])])]),
+ node('PRE',[node('DIV',['python',node('BUTTON',['Copy code'])]),node('CODE',['print(1)\n'],{class:'language-python'})]),
+ node('H3',['小结']),node('P',['结束',node('SPAN',['隐藏'],{'aria-hidden':'true'})]),node('DIV',[node('BUTTON',['Copy'])])])],{'data-message-author-role':'assistant'});
+f.messages.push(msg('user','Request ID: layout'),reply);f.notify();
+const layout='第一段 **重点**，见 `main.swift`，公式 $x^2$。\n\n- 项目一\n- 项目二\n  1. 子项\n\n```python\nprint(1)\n```\n\n### 小结\n\n结束';
+assert.equal(f.run({action:'status',owner:'layout',id:'layout'}).text,layout);
+assert.equal(f.run({action:'complete',owner:'layout',id:'layout',expected:layout}).state,'completed');
+f=fixture();f.run({action:'start',id:'flat',prompt:'Request ID: flat'});f.messages.push(msg('user','Request ID: flat'),msg('assistant','纯文本回复'));f.notify();
+assert.equal(f.run({action:'status',id:'flat'}).text,'纯文本回复');
+console.log('PASS layout: reply rebuilt as Markdown (paragraphs, bold, inline code, math, nested lists, fenced code, headings); controls, hidden and screen-reader text skipped; plain-text fallback.');
