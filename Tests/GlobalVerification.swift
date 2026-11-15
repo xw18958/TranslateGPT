@@ -92,6 +92,10 @@ struct FakeSelectionAccess: SelectionAccess {
         precondition(SelectionPolicy.isSelectionGesture(start:start,end:end,clicks:1))
         precondition(SelectionPolicy.accepts(lines[0]) && !SelectionPolicy.accepts("sender@example.invalid"))
         precondition(!SelectionPolicy.accepts("https://example.invalid") && !SelectionPolicy.accepts("10.1.2.3"))
+        precondition(!SelectionPolicy.accepts("main.swift") && SelectionPolicy.rejection(" https://example.invalid/a ")=="address_only")
+        precondition(SelectionPolicy.accepts("Edit main.swift so the parser handles README.md and Node.js files."))
+        precondition(SelectionPolicy.accepts("Email sender@example.invalid or see https://example.invalid for details."))
+        precondition(SelectionPolicy.accepts("generalisation") && SelectionPolicy.rejection("12345")=="no_letters" && SelectionPolicy.rejection("")=="length")
         print("PASS extraction: selected text, touched ancestors, ambiguous and stale-pane rejection, secure ancestors, foreign process, cycles, lengths and ordinary clicks")
 
         precondition(ScreenCoordinates.quartz(CGRect(x:100,y:100,width:300,height:200),primaryHeight:900)==CGRect(x:100,y:600,width:300,height:200))

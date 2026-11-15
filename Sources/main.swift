@@ -460,7 +460,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 print("TranslateGPT phase=extraction_without_text kind=\(result.diagnosticKind)");fflush(stdout)
             }
             // Last resort for apps that expose no readable selection: copy it, then restore the clipboard.
-            if result == .none || result == .unavailable, self.settings.copyFallback {
+            // Also when Accessibility reports two different selections: the app's own copy names the current one.
+            if result == .none || result == .unavailable || result == .ambiguous, self.settings.copyFallback {
                 let access=AXSelectionAccess(pid:app.pid)
                 let top=access.frame(window).map { from.y-$0.minY < 30 } ?? true
                 if CopyFallbackPolicy.allowed(bundleID:NSRunningApplication(processIdentifier:app.pid)?.bundleIdentifier,
@@ -480,7 +481,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func accept(_ text: String, near point: NSPoint) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard SelectionPolicy.accepts(trimmed) else { return }
+        if let reason=SelectionPolicy.rejection(trimmed) {
+            if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=selection_skipped reason=\(reason)");fflush(stdout) }
+            return
+        }
         model.translate(trimmed)
         display(near: point)
     }

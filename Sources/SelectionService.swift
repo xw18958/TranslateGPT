@@ -48,16 +48,22 @@ final class SelectionSettings {
 }
 
 enum SelectionPolicy {
-    static func accepts(_ text: String) -> Bool {
+    static func accepts(_ text: String) -> Bool { rejection(text) == nil }
+    /// Source-free reason a selection is not translated, or nil when it is accepted.
+    /// A selection that is only an address, link, email, file name or IP stays silent; text that merely mentions one
+    /// (for example "Edit main.swift to fix the parser") is translated.
+    static func rejection(_ text: String) -> String? {
         let value=text.trimmingCharacters(in:.whitespacesAndNewlines)
-        guard (1...12000).contains(value.count), value.range(of:"[a-zA-Z]",options:.regularExpression) != nil else { return false }
+        guard (1...12000).contains(value.count) else { return "length" }
+        guard value.range(of:"[a-zA-Z]",options:.regularExpression) != nil else { return "no_letters" }
         let patterns = [
             #"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#,
             #"(?i)\b(?:https?://|www\.)\S+"#,
             #"(?i)\b(?:[A-Z0-9-]+\.)+[A-Z]{2,}(?:/[^\s]*)?\b"#,
             #"\b(?:\d{1,3}\.){3}\d{1,3}\b"#
         ]
-        return !patterns.contains { value.range(of:$0,options:.regularExpression) != nil }
+        let remainder=patterns.reduce(value) { $0.replacingOccurrences(of:$1,with:" ",options:.regularExpression) }
+        return remainder.range(of:"[a-zA-Z]{2,}",options:.regularExpression) == nil ? "address_only" : nil
     }
     static func isSelectionGesture(start: CGPoint?, end: CGPoint, clicks: Int) -> Bool {
         guard let start else { return false }
