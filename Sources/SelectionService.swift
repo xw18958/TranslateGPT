@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 
 struct SourceApplication: Equatable {
     let pid: pid_t
@@ -33,6 +34,11 @@ final class SelectionSettings {
     var screenPermissionRequested: Bool {
         get { defaults.string(forKey:"TranslateGPT.ocrPermissionRequestedBuild") == Self.currentBuild }
         set { if newValue { defaults.set(Self.currentBuild,forKey:"TranslateGPT.ocrPermissionRequestedBuild") } else { defaults.removeObject(forKey:"TranslateGPT.ocrPermissionRequestedBuild") } }
+    }
+    // Copy fallback for apps without a readable selection; on unless the user turns it off.
+    var copyFallback: Bool {
+        get { defaults.object(forKey:"TranslateGPT.copyFallbackEnabled") == nil ? true : defaults.bool(forKey:"TranslateGPT.copyFallbackEnabled") }
+        set { defaults.set(newValue,forKey:"TranslateGPT.copyFallbackEnabled") }
     }
     func exclude(_ app: SourceApplication) { var items=exclusions; items[app.key]=app.name; defaults.set(items, forKey:exclusionsKey) }
     func include(_ key: String) { var items=exclusions; items.removeValue(forKey:key); defaults.set(items, forKey:exclusionsKey) }
@@ -86,6 +92,71 @@ enum ElectronAccessibilityPolicy {
               ElectronAccessibilityPolicy.eligible(bundleID:app.bundleIdentifier,bundleURL:app.bundleURL) else { return false }
         requested.insert(pid)
         return AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid),"AXManualAccessibility" as CFString,kCFBooleanTrue) == .success
+    }
+}
+
+// Last-resort copy for apps whose selection Accessibility cannot read (for example Java, canvas or PDF views).
+// The user enabled this explicitly; it never runs in password managers, Finder, secure input or on window chrome.
+enum CopyFallbackPolicy {
+    static let neverCopy:Set<String>=["com.apple.finder","com.apple.Passwords","com.apple.keychainaccess","com.1password.1password",
+        "com.agilebits.onepassword7","com.bitwarden.desktop","org.keepassxc.keepassxc","com.lastpass.LastPass","com.apple.systempreferences"]
+    static let nonTextRoles:Set<String>=["AXScrollBar","AXValueIndicator","AXSlider","AXButton","AXToolbar","AXSplitter","AXTabGroup",
+        "AXMenuBar","AXMenuButton","AXPopUpButton","AXCheckBox","AXRadioButton","AXIncrementor","AXDisclosureTriangle","AXImage"]
+    static func secureInputActive() -> Bool { IsSecureEventInputEnabled() }
+    static func allowed(bundleID: String?, startRole: String?, secureInput: Bool, nearTitleBar: Bool) -> Bool {
+        !secureInput && !nearTitleBar && !neverCopy.contains(bundleID ?? "") && !nonTextRoles.contains(startRole ?? "")
+    }
+    /// Plain text only: copied files and image-only content are refused.
+    static func acceptsCopiedTypes(_ types: [String]) -> Bool {
+        types.contains(NSPasteboard.PasteboardType.string.rawValue) && !types.contains(NSPasteboard.PasteboardType.fileURL.rawValue)
+            && !types.contains("NSFilenamesPboardType")
+    }
+}
+
+// Exact copy of every clipboard item and type, so the user's clipboard can be put back after the fallback.
+struct PasteboardSnapshot: Equatable {
+    let items: [[String:Data]]
+    init(_ board: NSPasteboard) {
+        items=(board.pasteboardItems ?? []).map { item in
+            var values=[String:Data]()
+            for type in item.types { if let data=item.data(forType:type) { values[type.rawValue]=data } }
+            return values
+        }
+    }
+    func restore(to board: NSPasteboard) {
+        board.clearContents()
+        let restored=items.map { values -> NSPasteboardItem in
+            let item=NSPasteboardItem()
+            for (type,data) in values { item.setData(data,forType:NSPasteboard.PasteboardType(type)) }
+            return item
+        }
+        if !restored.isEmpty { board.writeObjects(restored) }
+    }
+}
+
+@MainActor enum CopyFallback {
+    struct Result { let text: String?; let outcome: String; let restored: Bool }
+    /// Sends ⌘C to the frontmost app (checked by the caller), reads plain text, then restores the previous clipboard.
+    static func copySelection(board: NSPasteboard = .general) async -> Result {
+        let before=PasteboardSnapshot(board), startCount=board.changeCount
+        let source=CGEventSource(stateID:.hidSystemState)
+        for down in [true,false] {
+            let event=CGEvent(keyboardEventSource:source,virtualKey:CGKeyCode(kVK_ANSI_C),keyDown:down)
+            event?.flags = .maskCommand
+            event?.post(tap:.cghidEventTap)
+        }
+        var text: String?, outcome="nothing_copied"
+        for _ in 0..<14 {
+            try? await Task.sleep(nanoseconds:25_000_000)
+            guard board.changeCount != startCount else { continue }
+            try? await Task.sleep(nanoseconds:30_000_000) // let the app finish writing all representations
+            if CopyFallbackPolicy.acceptsCopiedTypes(board.types?.map(\.rawValue) ?? []),
+               let copied=board.string(forType:.string), !copied.isEmpty { text=copied; outcome="text" } else { outcome="rejected_type" }
+            break
+        }
+        guard board.changeCount != startCount else { return Result(text:nil,outcome:outcome,restored:true) }
+        before.restore(to:board)
+        return Result(text:text,outcome:outcome,restored:PasteboardSnapshot(board)==before)
     }
 }
 
@@ -170,13 +241,16 @@ struct AXSelectionAccess: SelectionAccess {
             return role=="AXSecureTextField" || role=="AXPasswordField"
         }
     }
-    func contains(_ e: AXUIElement, _ point: CGPoint) -> Bool {
+    func contains(_ e: AXUIElement, _ point: CGPoint) -> Bool { frame(e)?.contains(point) ?? false }
+    /// Global top-left-origin frame, the same coordinate space as `hit`.
+    func frame(_ e: AXUIElement) -> CGRect? {
         guard let p=value(e,kAXPositionAttribute as String),CFGetTypeID(p)==AXValueGetTypeID(),
-              let s=value(e,kAXSizeAttribute as String),CFGetTypeID(s)==AXValueGetTypeID() else { return false }
+              let s=value(e,kAXSizeAttribute as String),CFGetTypeID(s)==AXValueGetTypeID() else { return nil }
         var origin=CGPoint.zero,size=CGSize.zero
-        guard AXValueGetValue(p as! AXValue,.cgPoint,&origin),AXValueGetValue(s as! AXValue,.cgSize,&size),size.width>0,size.height>0 else { return false }
-        return CGRect(origin:origin,size:size).contains(point)
+        guard AXValueGetValue(p as! AXValue,.cgPoint,&origin),AXValueGetValue(s as! AXValue,.cgSize,&size),size.width>0,size.height>0 else { return nil }
+        return CGRect(origin:origin,size:size)
     }
+    func role(at point: CGPoint) -> String? { hit(point).flatMap { value($0,kAXRoleAttribute as String) as? String } }
     func selected(_ e: AXUIElement) -> String? {
         if let text=value(e,kAXSelectedTextAttribute as String) as? String, !text.isEmpty { return text }
         if let range=value(e,"AXSelectedTextMarkerRange") {

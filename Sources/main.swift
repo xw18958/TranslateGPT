@@ -273,6 +273,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         exclude.target=self;exclude.tag=101;menu.addItem(exclude)
         let exclusions=NSMenuItem(title:"Excluded apps",action:nil,keyEquivalent:"")
         exclusions.submenu=NSMenu();exclusions.tag=102;menu.addItem(exclusions)
+        let copyFallback=NSMenuItem(title:"Copy fallback when selection is unreadable",action:#selector(toggleCopyFallback(_:)),keyEquivalent:"")
+        copyFallback.target=self;copyFallback.state=settings.copyFallback ? .on:.off;copyFallback.toolTip="Only when Accessibility cannot read a selection: press ⌘C, translate the copied text, then restore your clipboard.";menu.addItem(copyFallback)
         let ocr=NSMenuItem(title:hotKeyAvailable ? "Translate screen region":"Translate screen region (shortcut unavailable)",action:#selector(beginOCR),keyEquivalent:"t")
         ocr.target=self;ocr.keyEquivalentModifierMask=[.control,.option,.command];menu.addItem(ocr)
         menu.addItem(.separator())
@@ -452,8 +454,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 result=await extract()
                 guard current() else { return }
             }
-            if CommandLine.arguments.contains("--diagnostics"), result.diagnosticKind != "text" {
+            let diagnostics=CommandLine.arguments.contains("--diagnostics")
+            if diagnostics, CommandLine.arguments.contains("--force-copy-fallback") { result = .none } // live test of the fallback path
+            if diagnostics, result.diagnosticKind != "text" {
                 print("TranslateGPT phase=extraction_without_text kind=\(result.diagnosticKind)");fflush(stdout)
+            }
+            // Last resort for apps that expose no readable selection: copy it, then restore the clipboard.
+            if result == .none || result == .unavailable, self.settings.copyFallback {
+                let access=AXSelectionAccess(pid:app.pid)
+                let top=access.frame(window).map { from.y-$0.minY < 30 } ?? true
+                if CopyFallbackPolicy.allowed(bundleID:NSRunningApplication(processIdentifier:app.pid)?.bundleIdentifier,
+                                              startRole:access.role(at:from),secureInput:CopyFallbackPolicy.secureInputActive(),nearTitleBar:top) {
+                    let copy=await CopyFallback.copySelection()
+                    if diagnostics { print("TranslateGPT phase=copy_fallback outcome=\(copy.outcome) restored=\(copy.restored)");fflush(stdout) }
+                    guard current() else { return }
+                    if let text=copy.text { result = .text(text) }
+                } else if diagnostics { print("TranslateGPT phase=copy_fallback outcome=skipped");fflush(stdout) }
             }
             if case .text(let text)=result {
                 if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=extracted uptime=\(ProcessInfo.processInfo.systemUptime)");fflush(stdout) }
@@ -480,6 +496,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.setFrameOrigin(NSPoint(x: x, y: min(max(y, area.minY + 8), area.maxY - h - 8)))
         panel.orderFrontRegardless()
         if CommandLine.arguments.contains("--diagnostics") { print("TranslateGPT phase=popup uptime=\(ProcessInfo.processInfo.systemUptime)"); fflush(stdout) }
+    }
+
+    @objc private func toggleCopyFallback(_ item: NSMenuItem) {
+        settings.copyFallback.toggle(); item.state=settings.copyFallback ? .on:.off
     }
 
     @objc private func toggleActive(_ item: NSMenuItem) {

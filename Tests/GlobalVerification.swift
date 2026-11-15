@@ -51,6 +51,24 @@ struct FakeSelectionAccess: SelectionAccess {
         precondition(!ElectronAccessibilityPolicy.eligible(bundleID:"com.example.notes",bundleURL:native) && !ElectronAccessibilityPolicy.eligible(bundleID:nil,bundleURL:nil))
         precondition(SelectedContent.none.diagnosticKind=="none" && SelectedContent.text("x").diagnosticKind=="text")
         print("PASS Electron selection access: Electron apps eligible once readable text is missing; code editors and native apps excluded")
+        precondition(settings.copyFallback);settings.copyFallback=false;precondition(!SelectionSettings(defaults:defaults).copyFallback);settings.copyFallback=true
+        precondition(CopyFallbackPolicy.allowed(bundleID:"com.example.reader",startRole:"AXGroup",secureInput:false,nearTitleBar:false))
+        precondition(!CopyFallbackPolicy.allowed(bundleID:"com.example.reader",startRole:"AXGroup",secureInput:true,nearTitleBar:false))
+        precondition(!CopyFallbackPolicy.allowed(bundleID:"com.example.reader",startRole:"AXGroup",secureInput:false,nearTitleBar:true))
+        precondition(!CopyFallbackPolicy.allowed(bundleID:"com.apple.finder",startRole:"AXGroup",secureInput:false,nearTitleBar:false))
+        precondition(!CopyFallbackPolicy.allowed(bundleID:"com.1password.1password",startRole:nil,secureInput:false,nearTitleBar:false))
+        precondition(!CopyFallbackPolicy.allowed(bundleID:"com.example.reader",startRole:"AXScrollBar",secureInput:false,nearTitleBar:false))
+        precondition(CopyFallbackPolicy.acceptsCopiedTypes(["public.utf8-plain-text","public.rtf"]))
+        precondition(!CopyFallbackPolicy.acceptsCopiedTypes(["public.utf8-plain-text","public.file-url"]) && !CopyFallbackPolicy.acceptsCopiedTypes(["public.png"]))
+        let board=NSPasteboard(name:NSPasteboard.Name("TranslateGPT-test-"+UUID().uuidString)), empty=NSPasteboard(name:NSPasteboard.Name("TranslateGPT-test-"+UUID().uuidString))
+        defer { board.releaseGlobally(); empty.releaseGlobally() }
+        board.clearContents()
+        let original=NSPasteboardItem();original.setString("user clipboard",forType:.string);original.setData(Data([1,2,3]),forType:NSPasteboard.PasteboardType("com.example.private"))
+        board.writeObjects([original]);let saved=PasteboardSnapshot(board)
+        board.clearContents();board.setString("copied selection",forType:.string)
+        saved.restore(to:board);precondition(PasteboardSnapshot(board)==saved && board.string(forType:.string)=="user clipboard")
+        empty.clearContents();let nothing=PasteboardSnapshot(empty);empty.setString("x",forType:.string);nothing.restore(to:empty);precondition(PasteboardSnapshot(empty).items.isEmpty)
+        print("PASS copy fallback: on by default with opt-out; refuses secure input, title bars, controls, Finder and password managers; text-only copies; exact clipboard restore")
 
         let start=CGPoint(x:0,y:0),end=CGPoint(x:20,y:0)
         func read(_ access:FakeSelectionAccess) -> SelectedContent { SelectionExtractor(access:access).read(start:start,end:end) }
